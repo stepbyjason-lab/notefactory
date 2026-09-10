@@ -1,0 +1,2 @@
+# Runtime dependency for all supported HTTP LLM providers.
+requests>=2.31,<3

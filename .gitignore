@@ -1,0 +1,24 @@
+# 시크릿 (절대 커밋 금지)
+.env
+.env.*
+!.env.example
+
+# 산출물/작업
+notes_out/
+scratchpad/
+*.note.md.tmp
+.out/
+dist/
+.tmp/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# round-16 계약 §3.3.1 — madi usage-guard fail-open 연속 카운터 상태(runtime
+# 산출물). 자체 opt-in sentinel(.madi/usage-guard.enabled)은 ignore하지 않는다.
+.madi/usage-guard.fail-open-state.json
+
+# 모델 헬스 캐시·알림 (하루 1회 갱신, 재현 가능한 산출물 아님)
+.cache/
