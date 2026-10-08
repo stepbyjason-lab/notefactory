@@ -2,7 +2,7 @@
 
 # NoteFactory
 
-> **현재 공개 버전: v0.1.1**
+> **현재 공개 버전: v0.1.2**
 
 Sipher가 정규화한 JSON을 한국어 지식노트 Markdown으로 바꾸는 로컬 파이프라인입니다.
 
@@ -110,6 +110,9 @@ OCR, 전사, Threads 연속글, 로그인 플랫폼은 Sipher의 최신 공개 �
 # 특정 writer만 고정해 실험할 때
 python note_pipe.py source.json --out notes_out --provider gemini --model gemini-3.5-flash-lite --no-writer-fallback
 
+# critic까지 고정할 때. 요청한 critic이 실패해도 다른 critic 모델을 부르지 않습니다.
+python note_pipe.py source.json --out notes_out --provider gemini --model gemini-3.5-flash-lite --no-writer-fallback --critic-provider gemini --critic-model gemma-4-31b-it --no-critic-fallback
+
 # 빠른 경량 경로
 python note_pipe.py source.json --out notes_out --profile light
 
@@ -117,7 +120,7 @@ python note_pipe.py source.json --out notes_out --profile light
 
 전체 옵션은 `python note_pipe.py --help`를 확인하세요.
 
-`--vault`는 v0.1.1에서 maintainer의 로컬 Windows 경로에 연결된 내부 개발 통합입니다.
+`--vault`는 v0.1.2에서 maintainer의 로컬 Windows 경로에 연결된 내부 개발 통합입니다.
 공개 사용자는 항상 명시적인 `--out` 디렉터리를 사용하세요.
 
 ## 원문 보전 원칙

@@ -22,3 +22,11 @@ __pycache__/
 
 # 모델 헬스 캐시·알림 (하루 1회 갱신, 재현 가능한 산출물 아님)
 .cache/
+
+# Madi 훅의 턴 종료 상태(세션별 런타임 산출물)
+.madi/turn-end/
+
+# Claude Code 로컬 상태(개인 권한 허용·예약 작업 잠금). 이 기계의 전역 ignore와
+# .git/info/exclude에만 걸려 있어 다른 클론에서는 노출되므로 레포에서 막는다.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

@@ -2,6 +2,16 @@
 
 All notable public-release changes are documented here.
 
+## [0.1.2] - 2026-10-08
+
+### Added
+
+- `--no-critic-fallback` pins the critic for controlled benchmarks. With the flag, the
+  critic client holds only the requested critic model. If that critic fails, NoteFactory
+  does not call another free critic, the paid critic tail, or the premium arbiter. The
+  long-material retry keeps the same setting. Without the flag, critic fallback and
+  default generation behave as in v0.1.1.
+
 ## [0.1.1] - 2026-09-10
 
 ### Added

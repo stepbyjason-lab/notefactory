@@ -2,7 +2,7 @@
 
 # NoteFactory
 
-> **Current public release: v0.1.1**
+> **Current public release: v0.1.2**
 
 Turn Sipher's normalized JSON into a usable Korean knowledge note.
 
@@ -119,6 +119,9 @@ you can inspect the output and the remaining findings instead of losing evidence
 # Explicit writer model, without writer fallback. Useful for a controlled test.
 python note_pipe.py source.json --out notes_out --provider gemini --model gemini-3.5-flash-lite --no-writer-fallback
 
+# Also pin the critic. If the requested critic fails, no other critic model is called.
+python note_pipe.py source.json --out notes_out --provider gemini --model gemini-3.5-flash-lite --no-writer-fallback --critic-provider gemini --critic-model gemma-4-31b-it --no-critic-fallback
+
 # Lightweight pipeline: synthesis + deterministic gates + conditional repair.
 python note_pipe.py source.json --out notes_out --profile light
 
@@ -126,7 +129,7 @@ python note_pipe.py source.json --out notes_out --profile light
 
 Run `python note_pipe.py --help` for the complete CLI contract.
 
-`--vault` is an internal development integration in v0.1.1: its destination is
+`--vault` is an internal development integration in v0.1.2: its destination is
 currently tied to the maintainer's local Windows layout and is not portable. Public
 users should always choose an explicit `--out` directory.
 

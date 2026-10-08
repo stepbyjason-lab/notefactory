@@ -2764,6 +2764,7 @@ def run_note_harness(
     critic_model: str | None = None,
     use_premium_arbiter: bool = False,
     allow_writer_fallback: bool = True,
+    allow_critic_fallback: bool = True,
     allow_paid_fallback: bool = False,
     paid_context: PaidFallbackContext | None = None,
     long_material_preparation: LongMaterialPreparation | None = None,
@@ -2788,7 +2789,7 @@ def run_note_harness(
             능력 벤치에서 무료 후보 5종 중 recall·precision 최우수)로 해석해
             synthesis와 분리된 별도 client를 만든다. `_validate_args`가 부분
             지정을 이미 막으므로 여기서는 "둘 다 있음" 또는 "둘 다 None"만 들어온다.
-        use_premium_arbiter: True이고 ``allow_paid_fallback``도 True이며 critic이 명시되지 않았으면(round-16
+        use_premium_arbiter: True이고 ``allow_paid_fallback``·``allow_critic_fallback``도 True이며 critic이 명시되지 않았으면(round-16
             계약 §3.2.1) 기존 GLM-5.2 critic 대신 프리미엄 아비터 4단계
             폴백 체인(AG GPT-OSS → AG Gemini → Codex luna → Claude Haiku →
             GLM-5.2 free fallback)을 critic_fn 자리에 주입한다. 반환된
@@ -2797,6 +2798,11 @@ def run_note_harness(
         allow_writer_fallback: False면 요청 writer만 호출한다. 모델 품질 bench는
             fallback writer의 노트를 요청 모델 성적으로 기록하면 안 되므로 이 값을
             끈다.
+        allow_critic_fallback: False면 요청 critic(명시값, 없으면 기본 critic) 한
+            모델만 담은 client를 쓴다. 그 critic이 실패해도 무료 critic pool의 다른
+            모델·유료 critic·프리미엄 아비터를 붙이지 않는다. 모델 품질 bench는 다른
+            critic의 지적으로 수리된 노트를 고정 critic 조건의 성적으로 기록하면 안
+            되므로 이 값을 끈다.
         allow_paid_fallback: 사용자가 명시적으로 유료 폴백을 승인했을 때만 True.
             False(기본)이면 writer/critic/회색지대 아비터 어느 경로도 유료 vendor를
             호출하지 않는다. True여도 paid route는 전체 무료 pool 소진 뒤에만 붙는다.
@@ -2867,7 +2873,10 @@ def run_note_harness(
             # GenerationRoute.use_premium_arbiter=True(text_post 회색지대)이면
             # 프리미엄 아비터를 critic_fn 자리에 주입. (3) 그 외 현행 기본
             # critic(nvidia_nim/z-ai/glm-5.2).
+            # critic fallback을 끄면 (2)와 유료 critic 꼬리도 붙지 않는다 —
+            # 요청 critic이 실패하면 그 실패가 그대로 드러난다.
             critic_explicitly_specified = critic_provider is not None and critic_model is not None
+            paid_critic_tail_enabled = paid_enabled and allow_critic_fallback
             # Keep the old fail-fast boundary: a missing/broken critic prompt is
             # diagnosed before any writer request spends tokens.  The actual
             # critic client remains lazy so it can exclude the model that really
@@ -2881,7 +2890,10 @@ def run_note_harness(
                 return provider, model
 
             def _standard_free_critic(source_text: str, note: str) -> dict:
-                """Use every qualified free critic route and never append paid here."""
+                """Use the qualified free critic routes and never append paid here.
+
+                With critic fallback off the client holds only the requested route.
+                """
                 _actual_writer_provider, actual_writer_model = _actual_writer_identity()
                 if critic_explicitly_specified:
                     resolved_provider = str(critic_provider)
@@ -2891,7 +2903,7 @@ def run_note_harness(
                 critic_client = build_harness_client(
                     provider=resolved_provider,
                     model=resolved_model,
-                    fallback_scope="critic",
+                    fallback_scope="critic" if allow_critic_fallback else "none",
                     # writer·critic은 단계와 입력이 분리돼 있어 같은 모델을 막지 않는다.
                     # 2026-09-05 사용자 결정: 동일모델 회피 규칙 제거.
                     excluded_models=(),
@@ -2925,7 +2937,7 @@ def run_note_harness(
                     arbiter_audit_sink.append({"stage": "free_critic_pool", "status": "exhausted"})
                     return _selected_paid_critic(source_text, note)
 
-            if not critic_explicitly_specified and use_premium_arbiter and paid_enabled:
+            if not critic_explicitly_specified and use_premium_arbiter and paid_critic_tail_enabled:
                 def _free_fallback_factory() -> Callable[[str, str], dict]:
                     # This is reached only after the free critic pool has
                     # already failed. Do not reintroduce a paid tail here.
@@ -2960,7 +2972,7 @@ def run_note_harness(
                 # nvidia_nim/z-ai/glm-5.2, 또는 명시 지정 값) — light profile은
                 # critic 자체를 안 쓰므로 이 client는 default profile에서만 만든다.
                 critic_fn = _wrap_critic_fn_capturing_model_reported(
-                    _free_then_selected_paid_critic if paid_enabled and not critic_explicitly_specified else _standard_free_critic,
+                    _free_then_selected_paid_critic if paid_critic_tail_enabled and not critic_explicitly_specified else _standard_free_critic,
                     model_reported_sink,
                     critic_route_sink,
                 )
@@ -3056,6 +3068,7 @@ def run_note_harness(
                 critic_model=critic_model,
                 use_premium_arbiter=use_premium_arbiter,
                 allow_writer_fallback=allow_writer_fallback,
+                allow_critic_fallback=allow_critic_fallback,
                 allow_paid_fallback=allow_paid_fallback,
                 paid_context=paid_context,
                 long_material_preparation=None,
@@ -3347,6 +3360,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-critic-fallback",
+        action="store_true",
+        help=(
+            "요청 critic만 호출한다 — free-pool critic fallback과 유료·프리미엄 critic "
+            "꼬리를 끈다. 모델 품질 bench 전용 — 고정 critic이 실패해도 다른 critic "
+            "모델을 부르지 않는다."
+        ),
+    )
+    parser.add_argument(
         "--allow-paid-fallback",
         action="store_true",
         help=(
@@ -3606,6 +3628,8 @@ def run(args: argparse.Namespace) -> Path:
         harness_kwargs["paid_context"] = build_paid_fallback_context()
     if getattr(args, "no_writer_fallback", False):
         harness_kwargs["allow_writer_fallback"] = False
+    if getattr(args, "no_critic_fallback", False):
+        harness_kwargs["allow_critic_fallback"] = False
     if long_material_preparation is not None:
         harness_kwargs["long_material_preparation"] = long_material_preparation
         harness_kwargs["long_material_fallback_transcript"] = original_transcript_for_fallback
