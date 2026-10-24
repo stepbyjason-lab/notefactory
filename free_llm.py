@@ -1,10 +1,11 @@
 """NoteFactory generation adapter.
 
-Most providers use second-opinion's unified generation dispatcher. NVIDIA NIM is
-the one explicit exception: its direct OpenAI-compatible endpoint is the source
-of truth for the live model catalog, while the installed dispatcher catalog can
-lag and return HTTP 410 for models that NIM accepts. Route selection, ordering,
-and cross-route attempt history remain NoteFactory-owned.
+Every model call goes through second-opinion's dispatcher.  HTTP providers,
+NVIDIA NIM included, use the unified ``--request-json`` generation path;
+subscription vendors use the dispatcher CLI path.  This module contains no
+vendor HTTP adapter, same-route retry loop, or per-vendor rate limiter:
+second-opinion owns transport and retries within one requested route.  Route
+selection, ordering, and cross-route attempt history remain NoteFactory-owned.
 
 Security invariants:
 - provider credentials are never placed in argv, request JSON, logs, or results;
@@ -20,12 +21,8 @@ import logging
 import os
 import subprocess
 import tempfile
-import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-
-import requests
 
 logger = logging.getLogger(__name__)
 
@@ -179,121 +176,6 @@ _EFFORT_IN_MODEL_SLUG_VENDORS = frozenset({"agy"})
 #: 노트마다 추론 토큰을 낭비한다. critic 경로는 자기 effort를 명시로
 #: 넘기므로 이 기본값에 영향받지 않는다.
 DEFAULT_SUBSCRIPTION_EFFORT = "medium"
-
-# NIM 무료 tier의 40 RPM은 API key 단위다. source별 benchmark를 별도 Python
-# process로 병렬 실행하면 process-local limiter로는 보호할 수 없다. 30 RPM으로
-# 여유를 둔 이 file lock은 같은 Windows 계정의 NoteFactory 모든 process가 공유한다.
-_NIM_MIN_REQUEST_INTERVAL_SECONDS = 2.0
-_NIM_RATE_LOCK_PATH = Path(tempfile.gettempdir()) / "notefactory-nim-request-rate.lock"
-_NIM_MAX_CONCURRENT_REQUESTS = 2
-_NIM_CONCURRENCY_DIR = Path(tempfile.gettempdir()) / "notefactory-nim-inflight-slots"
-
-
-@contextmanager
-def _nim_rate_file_lock(path: Path):
-    """Windows/POSIX 모두에서 1바이트 advisory lock을 잡는다."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as handle:
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            # LK_LOCK은 다른 NoteFactory process가 file byte를 잡았을 때 Windows에서
-            # block 대신 Errno 36(Resource deadlock avoided)를 낼 수 있다. 동시
-            # slot과 같은 non-blocking 재시도로만 기다린다.
-            while True:
-                try:
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    time.sleep(0.05)
-            try:
-                yield handle
-            finally:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield handle
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def _wait_for_nim_request_slot() -> None:
-    """NIM request start를 계정 전체에서 30 RPM 이하로 유지한다."""
-    with _nim_rate_file_lock(_NIM_RATE_LOCK_PATH) as handle:
-        handle.seek(0)
-        try:
-            previous = float(handle.read().decode("ascii") or "0")
-        except ValueError:
-            previous = 0.0
-        wait = previous + _NIM_MIN_REQUEST_INTERVAL_SECONDS - time.monotonic()
-        # monotonic은 부팅마다 원점이 달라진다. 재부팅 뒤 남아 있는 이전 부팅의
-        # 큰 값을 그대로 믿으면 모든 NIM 요청이 몇 시간씩 잠든다. 정상 대기는
-        # 절대 간격을 넘지 않으므로 그 위는 stale 기록으로 보고 잘라낸다.
-        wait = min(wait, _NIM_MIN_REQUEST_INTERVAL_SECONDS)
-        if wait > 0:
-            time.sleep(wait)
-        handle.seek(0)
-        handle.truncate()
-        handle.write(f"{time.monotonic():.9f}".encode("ascii"))
-        handle.flush()
-
-
-def _try_lock_nim_slot(path: Path):
-    """하나의 NIM in-flight token을 non-blocking으로 잡고 handle을 돌려준다."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+b")
-    handle.seek(0, os.SEEK_END)
-    if handle.tell() == 0:
-        handle.write(b"0")
-        handle.flush()
-    handle.seek(0)
-    try:
-        if os.name == "nt":
-            import msvcrt
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        handle.close()
-        return None
-    return handle
-
-
-def _unlock_nim_slot(handle) -> None:
-    try:
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()
-
-
-@contextmanager
-def _nim_concurrency_slot():
-    """계정 전체의 실제 NIM HTTP in-flight 요청을 두 개로 제한한다."""
-    while True:
-        for index in range(_NIM_MAX_CONCURRENT_REQUESTS):
-            handle = _try_lock_nim_slot(_NIM_CONCURRENCY_DIR / f"slot-{index}.lock")
-            if handle is None:
-                continue
-            try:
-                yield index
-            finally:
-                _unlock_nim_slot(handle)
-            return
-        time.sleep(0.1)
 
 
 class StreamingUnavailableError(RuntimeError):
@@ -735,183 +617,6 @@ def _call_generation_dispatcher(
     }
 
 
-def _nim_failure(response: "requests.Response") -> ProviderCallError:
-    """NIM의 HTTP 실패를 dispatcher failure taxonomy로 보존한다."""
-    status = response.status_code
-    detail = (response.text or "").strip().replace("\n", " ")[:240]
-    if status == 410:
-        failure_class = "model-unavailable"
-    elif status == 429:
-        failure_class = "rate-limited"
-    else:
-        failure_class = "vendor-error"
-    return ProviderCallError(
-        f"NIM HTTP {status}: {detail or '응답 본문 없음'}",
-        status_code=status,
-        is_retryable=status == 429 or status >= 500,
-        failure_class=failure_class,
-        failure_actor="vendor",
-    )
-
-
-def _call_nvidia_nim_direct(
-    config: ProviderConfig,
-    prompt: str,
-    system_prompt: str | None,
-    *,
-    stream: bool,
-    policy: RetryPolicy,
-) -> dict:
-    """현재 NIM 카탈로그를 직접 사용하는 OpenAI-compatible 호출.
-
-    2026-08-30 실측: dispatcher는 gemma-4-31b-it에 HTTP 410을 냈지만, 같은
-    base URL/model/stream/max_tokens의 직접 요청은 200 SSE를 냈다. 이 경로는 그
-    catalog drift가 무료 writer 품질 측정을 모델 탈락으로 바꾸지 않게 한다.
-    """
-    if not config.api_key or not config.base_url:
-        raise ProviderCallError(
-            "NIM 직접 호출 설정이 비어 있습니다",
-            failure_class="bad-invocation",
-            failure_actor="caller",
-        )
-    messages: list[dict[str, str]] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
-    payload = {
-        "model": config.model,
-        "messages": messages,
-        "max_tokens": model_completion_budget(config.model, policy.max_completion_tokens),
-        "stream": bool(stream),
-    }
-    url = f"{config.base_url.rstrip('/')}/chat/completions"
-    headers = {"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"}
-    attempts: list[dict[str, object]] = []
-    last_error: ProviderCallError | None = None
-
-    for attempt in range(1, policy.max_retries + 2):
-        try:
-            _wait_for_nim_request_slot()
-            with _nim_concurrency_slot():
-                response = requests.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    stream=stream,
-                    timeout=(30, policy.timeout_seconds),
-                )
-                with response:
-                    if response.status_code >= 400:
-                        raise _nim_failure(response)
-                    if not stream:
-                        data = response.json()
-                        choice = data["choices"][0]
-                        text = choice["message"]["content"]
-                        if not isinstance(text, str) or not text:
-                            raise ProviderCallError(
-                                "NIM 응답에 텍스트 내용이 없습니다",
-                                is_retryable=True,
-                                failure_class="invalid-response",
-                                failure_actor="vendor",
-                            )
-                        attempts.append({"attempt": attempt, "status": "success"})
-                        return {
-                            "text": text,
-                            "provider": config.name,
-                            "model": data.get("model") or config.model,
-                            "model_reported": "observed" if data.get("model") else "none",
-                            "requested_provider": config.name,
-                            "requested_model": config.model,
-                            "finish_reason": choice.get("finish_reason"),
-                            "truncated_suspected": False,
-                            "usage": data.get("usage"),
-                            "attempts": attempts,
-                        }
-
-                    text_parts: list[str] = []
-                    observed_model: str | None = None
-                    finish_reason: str | None = None
-                    usage: object = None
-                    for raw_line in response.iter_lines(decode_unicode=False):
-                        if not raw_line:
-                            continue
-                        line = raw_line.decode("utf-8", errors="replace")
-                        if not line.startswith("data: "):
-                            continue
-                        data_str = line[6:].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            continue
-                        if isinstance(chunk.get("model"), str):
-                            observed_model = chunk["model"]
-                        if chunk.get("usage") is not None:
-                            usage = chunk["usage"]
-                        choices = chunk.get("choices") or []
-                        if not choices:
-                            continue
-                        choice = choices[0]
-                        delta = choice.get("delta") or {}
-                        piece = delta.get("content")
-                        if isinstance(piece, str):
-                            text_parts.append(piece)
-                        if choice.get("finish_reason"):
-                            finish_reason = choice["finish_reason"]
-                    text = "".join(text_parts)
-                    if not text:
-                        raise ProviderCallError(
-                            "NIM 스트림 응답에 텍스트 내용이 없습니다",
-                            is_retryable=True,
-                            failure_class="invalid-response",
-                            failure_actor="vendor",
-                        )
-                    attempts.append({"attempt": attempt, "status": "success"})
-                    return {
-                        "text": text,
-                        "provider": config.name,
-                        "model": observed_model or config.model,
-                        "model_reported": "observed" if observed_model else "none",
-                        "requested_provider": config.name,
-                        "requested_model": config.model,
-                        "finish_reason": finish_reason,
-                        "truncated_suspected": finish_reason is None,
-                        "usage": usage,
-                        "attempts": attempts,
-                    }
-        except requests.exceptions.Timeout as exc:
-            last_error = ProviderCallError(
-                "NIM 요청 또는 스트림 read 타임아웃",
-                is_retryable=True,
-                failure_class="no-output-timeout",
-                failure_actor="vendor",
-            )
-        except requests.exceptions.RequestException as exc:
-            last_error = ProviderCallError(
-                f"NIM 네트워크 오류: {type(exc).__name__}",
-                is_retryable=True,
-                failure_class="vendor-error",
-                failure_actor="vendor",
-            )
-        except ProviderCallError as exc:
-            last_error = exc
-
-        assert last_error is not None
-        attempts.append({
-            "attempt": attempt,
-            "status": "failed",
-            "failureClass": last_error.failure_class,
-            "failureActor": last_error.failure_actor,
-        })
-        if not last_error.is_retryable or attempt > policy.max_retries:
-            last_error.attempts = attempts
-            raise last_error
-        time.sleep(min(float(2 ** (attempt - 1)), 8.0))
-
-    raise AssertionError("NIM retry loop must return or raise")
-
-
 @dataclass
 class FreeLLMClient:
     """Caller-owned ordered routes backed by one dispatcher call per route.
@@ -1007,15 +712,7 @@ class FreeLLMClient:
                 stream,
             )
             try:
-                if requested.name == "nvidia_nim":
-                    result = _call_nvidia_nim_direct(
-                        requested,
-                        prompt,
-                        system_prompt,
-                        stream=stream,
-                        policy=self.retry_policy,
-                    )
-                elif requested.name in SUBSCRIPTION_VENDORS:
+                if requested.name in SUBSCRIPTION_VENDORS:
                     result = _call_subscription_dispatcher(
                         requested,
                         prompt,

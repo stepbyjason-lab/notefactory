@@ -2,7 +2,7 @@
 
 # NoteFactory
 
-> **현재 공개 버전: v0.1.2**
+> **현재 공개 버전: v0.1.3**
 
 Sipher가 정규화한 JSON을 한국어 지식노트 Markdown으로 바꾸는 로컬 파이프라인입니다.
 
@@ -35,10 +35,35 @@ Sipher는 원문을 수집하고 수집 상태를 정직하게 라벨링합니�
   과금되는 provider를 직접 후보 목록에 추가하면 그것은 사용자의 명시 설정이며 비용이 발생할 수
   있습니다.
 - `--allow-paid-fallback`은 portable API-key fallback이 아니라 개발자 로컬 CLI 구독 연동입니다.
-  해당 provider 도구와 Node.js가 필요하며 공개 기본 setup에는 필요하지 않습니다.
+  해당 provider 도구가 추가로 필요합니다. Node.js는 공개 기본 API 경로에도 필요합니다.
 - 여러 계정이나 여러 키로 무료 한도를 우회하지 않습니다.
 
 ## 빠른 시작
+
+### 0. Node.js와 디스패처 준비
+
+디스패처는 공개 플러그인 [second-opinion](https://github.com/stepbyjason-lab/second-opinion)(MIT)에 들어 있습니다.
+Claude Code에서 `/plugin marketplace add stepbyjason-lab/second-opinion` 다음
+`/plugin install second-opinion@second-opinion`으로 설치하거나,
+`git clone https://github.com/stepbyjason-lab/second-opinion`으로 저장소를 받습니다.
+저장소에서는 `plugins/second-opinion/scripts/dispatch.mjs`, 플러그인 설치 후에는
+`~/.claude/plugins/cache/second-opinion/second-opinion/<버전>/scripts/dispatch.mjs`에 있습니다.
+
+Node.js를 설치하고 second-opinion 디스패처의 `dispatch.mjs` 경로를 준비합니다.
+NoteFactory를 실행할 셸에서 프로세스 환경변수 `SECOND_OPINION_DISPATCH`에 그 경로를
+지정합니다(`.env.local`에 넣는 값이 아닙니다).
+
+```powershell
+# Windows PowerShell
+$env:SECOND_OPINION_DISPATCH = "/path/to/second-opinion/scripts/dispatch.mjs"
+```
+
+```bash
+# macOS / Linux
+export SECOND_OPINION_DISPATCH="/path/to/second-opinion/scripts/dispatch.mjs"
+```
+
+자리표시자를 실제 디스패처 경로로 바꾸고 아래 단계를 진행하는 셸에 환경변수를 유지합니다.
 
 ### 1. 설치
 
@@ -81,6 +106,11 @@ Critic
 `WRITER_CANDIDATES`, `CRITIC_CANDIDATES`는 콤마 구분 `provider:model` 목록입니다.
 `.env.local`의 순서만 바꾸면 코드 수정 없이 우선순위를 바꿀 수 있습니다.
 
+기본 Gemini와 OpenRouter를 포함한 모든 API 경로는 second-opinion 디스패처를 거치며,
+Node.js와 0단계에서 설정한 프로세스 환경변수 `SECOND_OPINION_DISPATCH`가 필요합니다.
+v0.1.3부터 NVIDIA NIM 호출도 같은 경로를 사용합니다. NIM 경로를 쓰려면
+`NVIDIA_NIM_API_KEY`를 입력합니다.
+
 ### 3. Sipher로 입력 수집
 
 ```bash
@@ -89,6 +119,9 @@ python -m core fetch "https://www.threads.net/@someone/post/POST_ID" --json --ou
 ```
 
 OCR, 전사, Threads 연속글, 로그인 플랫폼은 Sipher의 최신 공개 문서를 따르세요.
+
+Sipher v0.1.8 출력의 `transcript_label` 값 `no_audio`·`not_requested`·`no_speech`·`skipped_ambient_audio`와
+`ocr_label=not_requested`를 처리합니다.
 
 ### 4. 노트 생성
 
@@ -103,6 +136,10 @@ OCR, 전사, Threads 연속글, 로그인 플랫폼은 Sipher의 최신 공개 �
 저장 경로가 출력됩니다. 노트 헤더의 `verified: True`는 최종 production gate가 통과했다는
 뜻입니다. `verified: False`여도 노트와 남은 finding을 보존하므로 실패 원인을 직접 확인할 수
 있습니다.
+
+Sipher 결과가 `transcript_label=no_speech`이고 `transcript`·`body_text`가 모두 비었거나 공백뿐인 문자열이면 `note_pipe.py`는 노트와 모델 호출 없이
+종료 코드 3(합성할 소스 없음)으로 끝납니다. 실패가 아니며 같은 입력으로 다시 실행해도 결과가 같습니다.
+다른 처리 실패는 기존대로 종료 코드 1입니다. `note_batch`는 이런 항목을 `no_synthesis_source` 결과로 따로 셉니다.
 
 ## 자주 쓰는 명령
 
@@ -120,7 +157,7 @@ python note_pipe.py source.json --out notes_out --profile light
 
 전체 옵션은 `python note_pipe.py --help`를 확인하세요.
 
-`--vault`는 v0.1.2에서 maintainer의 로컬 Windows 경로에 연결된 내부 개발 통합입니다.
+`--vault`는 v0.1.3에서 maintainer의 로컬 Windows 경로에 연결된 내부 개발 통합입니다.
 공개 사용자는 항상 명시적인 `--out` 디렉터리를 사용하세요.
 
 ## 원문 보전 원칙

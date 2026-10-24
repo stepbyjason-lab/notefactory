@@ -438,6 +438,9 @@ class ManifestRecord:
 _OUTCOME_VERIFIED = "verified"
 _OUTCOME_UNVERIFIED = "unverified"
 _OUTCOME_HARD_FAILURE = "hard_failure"
+#: round-29-H2 — 빈 no_speech 수집물의 「합성할 소스 없음」. 실패가 아니며
+#: 재배정·승격하지 않고 배치 exit code를 정하지 않는다(`_aggregate_exit_code`).
+_OUTCOME_NO_SYNTHESIS_SOURCE = "no_synthesis_source"
 
 
 @dataclass
@@ -842,6 +845,56 @@ def process_item(
             )
 
     assert fetch_payload is not None
+    # round-29-H2 — 빈 no_speech 수집물은 infer_source_kind의 BatchConfigError
+    # (→ unexpected_exception 하드 실패)로 가지 않는다. note_pipe run()과 같은
+    # 조건이며, note_pipe를 부르지 않고 「합성할 소스 없음」 결과로 기록한다.
+    # 이 결과는 실패가 아니며 재배정·승격하지 않고 배치 exit code를 정하지
+    # 않는다(`_aggregate_exit_code`는 hard_failure·unverified만 센다).
+    no_source_outcome = _OUTCOME_NO_SYNTHESIS_SOURCE
+    payload_meta = fetch_payload.get("meta")
+    payload_transcript = fetch_payload.get("transcript")
+    payload_body_text = fetch_payload.get("body_text")
+    if (
+        isinstance(payload_meta, dict)
+        and payload_meta.get("transcript_label") == "no_speech"
+        and isinstance(payload_transcript, str)
+        and not payload_transcript.strip()
+        and isinstance(payload_body_text, str)
+        and not payload_body_text.strip()
+    ):
+        now = _now_iso()
+        records.append(
+            ManifestRecord(
+                item_id=item_id,
+                url=item.url,
+                name=item.name,
+                profile=item.profile,
+                attempt=1,
+                fetch_status="ok",
+                pipe_exit_code=None,
+                verified=None,
+                note_path=None,
+                error_kind=no_source_outcome,
+                error_message=(
+                    "합성할 소스 없음 — 전사는 성공했지만 말소리가 없고 본문도 비어 있어 "
+                    "노트를 만들지 않았습니다(실패 아님)."
+                ),
+                usage_measured=False,
+                usage_estimated=False,
+                started_at=now,
+                finished_at=now,
+                assigned_provider=assigned_provider,
+                assigned_model=assigned_model,
+                source_kind=item.source_kind,
+            )
+        )
+        return ItemResult(
+            item=item,
+            item_id=item_id,
+            outcome=no_source_outcome,
+            note_path=None,
+            records=records,
+        )
     source_kind = resolve_item_source_kind(item, fetch_payload)
     # 앞선 transient fetch 실패 attempt도 동일 항목의 실제 payload 종류가
     # 뒤늦게 확인되면 backfill한다. manifest의 재시도 행이 null로 남아
@@ -1123,7 +1176,10 @@ def write_summary(results: list[ItemResult], path: Path) -> dict[str, object]:
     verified_count = sum(1 for r in results if r.outcome == _OUTCOME_VERIFIED)
     unverified_count = sum(1 for r in results if r.outcome == _OUTCOME_UNVERIFIED)
     hard_failure_count = sum(1 for r in results if r.outcome == _OUTCOME_HARD_FAILURE)
+    no_synthesis_source_count = sum(1 for r in results if r.outcome == _OUTCOME_NO_SYNTHESIS_SOURCE)
 
+    # round-29-H2: 「합성할 소스 없음」 건수는 기존 필드의 이름·값·위치를
+    # 건드리지 않도록 맨 뒤에 덧붙인다.
     summary = {
         "total": len(results),
         "verified": verified_count,
@@ -1133,6 +1189,7 @@ def write_summary(results: list[ItemResult], path: Path) -> dict[str, object]:
             {"item_id": r.item_id, "url": r.item.url, "outcome": r.outcome, "note_path": str(r.note_path) if r.note_path else None}
             for r in results
         ],
+        "no_synthesis_source": no_synthesis_source_count,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1298,11 +1355,12 @@ def main(argv: list[str] | None = None) -> None:
     summary = write_summary(results, batch_out_dir / "summary.json")
 
     logger.info(
-        "batch 완료: total=%s verified=%s unverified=%s hard_failure=%s",
+        "batch 완료: total=%s verified=%s unverified=%s hard_failure=%s no_synthesis_source=%s",
         summary["total"],
         summary["verified"],
         summary["unverified"],
         summary["hard_failure"],
+        summary["no_synthesis_source"],
     )
 
     raise SystemExit(_aggregate_exit_code(results))

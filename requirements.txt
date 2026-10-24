@@ -1,2 +1,2 @@
-# Runtime dependency for all supported HTTP LLM providers.
+# Retained dependency; NoteFactory v0.1.3 does not use requests in its runtime code.
 requests>=2.31,<3

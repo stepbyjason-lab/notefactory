@@ -2,7 +2,7 @@
 
 # NoteFactory
 
-> **Current public release: v0.1.2**
+> **Current public release: v0.1.3**
 
 Turn Sipher's normalized JSON into a usable Korean knowledge note.
 
@@ -42,10 +42,36 @@ It is designed for public content and free-tier model routes by default.
   explicit configuration and can incur charges.
 - `--allow-paid-fallback` is a developer-only local CLI-subscription integration,
   not a portable API-key fallback. It requires the matching local provider tooling
-  and Node.js, and is not needed for the public default setup.
+  in addition to Node.js, which is also required for the public default API routes.
 - It does not bypass provider quotas or automate multiple-account rotation.
 
 ## Quick start
+
+### 0. Prepare Node.js and the dispatcher
+
+The dispatcher is part of the public [second-opinion plugin](https://github.com/stepbyjason-lab/second-opinion) (MIT).
+Install it in Claude Code with `/plugin marketplace add stepbyjason-lab/second-opinion`
+and `/plugin install second-opinion@second-opinion`, or clone it with
+`git clone https://github.com/stepbyjason-lab/second-opinion`.
+In the repository, the dispatcher is `plugins/second-opinion/scripts/dispatch.mjs`;
+after a plugin install, it is `~/.claude/plugins/cache/second-opinion/second-opinion/<version>/scripts/dispatch.mjs`.
+
+Install Node.js and have the path to the second-opinion dispatcher's `dispatch.mjs`
+ready. In the shell used to run NoteFactory, set the process environment variable
+`SECOND_OPINION_DISPATCH` to that path (not in `.env.local`):
+
+```powershell
+# Windows PowerShell
+$env:SECOND_OPINION_DISPATCH = "/path/to/second-opinion/scripts/dispatch.mjs"
+```
+
+```bash
+# macOS / Linux
+export SECOND_OPINION_DISPATCH="/path/to/second-opinion/scripts/dispatch.mjs"
+```
+
+Replace the placeholder with your actual dispatcher path and keep the variable set
+in the shell used for the steps below.
 
 ### 1. Clone and install
 
@@ -89,6 +115,11 @@ You can reorder `WRITER_CANDIDATES` and `CRITIC_CANDIDATES` in `.env.local`.
 They are comma-separated `provider:model` lists, so no source-code edit is needed
 to change priority.
 
+All API routes, including the default Gemini route and OpenRouter, use the
+second-opinion dispatcher and require Node.js and the process environment variable
+`SECOND_OPINION_DISPATCH` configured in step 0. Since v0.1.3, NVIDIA NIM calls also
+use this path; provide `NVIDIA_NIM_API_KEY` to use a NIM route.
+
 ### 3. Collect a source with Sipher
 
 ```bash
@@ -98,6 +129,9 @@ python -m core fetch "https://www.threads.net/@someone/post/POST_ID" --json --ou
 
 Use Sipher's current public documentation for platform-specific options such as OCR,
 transcription, Threads continuation collection, or authenticated sources.
+
+NoteFactory handles Sipher v0.1.8 output, including `transcript_label` values `no_audio`, `not_requested`, `no_speech`,
+and `skipped_ambient_audio`, and `ocr_label=not_requested`.
 
 ### 4. Generate a note
 
@@ -112,6 +146,10 @@ transcription, Threads continuation collection, or authenticated sources.
 `note_pipe.py` prints the saved path. The note header records `verified: True` only
 when the final production gates pass. A note may be saved with `verified: False` so
 you can inspect the output and the remaining findings instead of losing evidence.
+
+If a Sipher result has `transcript_label=no_speech` and both `transcript` and `body_text` are empty or whitespace-only strings, `note_pipe.py` exits with code 3
+(no source to synthesize), without a note or any model call. This is not a failure; rerunning the same input gives the same result.
+Other processing failures still exit with code 1. `note_batch` counts these no-source items separately as `no_synthesis_source`.
 
 ## Common commands
 
@@ -129,7 +167,7 @@ python note_pipe.py source.json --out notes_out --profile light
 
 Run `python note_pipe.py --help` for the complete CLI contract.
 
-`--vault` is an internal development integration in v0.1.2: its destination is
+`--vault` is an internal development integration in v0.1.3: its destination is
 currently tied to the maintainer's local Windows layout and is not portable. Public
 users should always choose an explicit `--out` directory.
 

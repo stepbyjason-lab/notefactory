@@ -2,6 +2,39 @@
 
 All notable public-release changes are documented here.
 
+## [0.1.3] - 2026-10-24
+
+### Added
+
+- Sipher v0.1.8 label values are recognized in the collection-status block:
+  `transcript_label` values `no_audio`, `not_requested`, `no_speech`, and
+  `skipped_ambient_audio`, and `ocr_label` value `not_requested` now print their
+  meaning without being counted as deficits. The `not_requested`, `no_speech`,
+  and ambient-audio lines state that the corresponding content is not in the note.
+- `.env.example` includes the optional `NVIDIA_NIM_API_KEY` entry.
+
+### Fixed
+
+- Those five label values previously fell through to unreadable-status messages
+  (`TRANSCRIPT_UNREADABLE` or `OCR_UNREADABLE`).
+- Corrected the v0.1.2 README guidance: all API routes, including default Gemini
+  and OpenRouter, require Node.js and `SECOND_OPINION_DISPATCH`. Quick start now
+  begins with step 0 to prepare Node.js and the dispatcher.
+
+### Changed
+
+- A Sipher result with `transcript_label=no_speech` and empty `transcript` and
+  `body_text` now ends without a note or any model call, with exit code 3
+  ("no source to synthesize"; rerunning the same input gives the same result),
+  instead of an error. `note_batch` records these items as a separate
+  `no_synthesis_source` outcome: not a failure, never reassigned or promoted,
+  counted in `summary.json` and the completion log, and not used to set the batch
+  exit code.
+- NVIDIA NIM calls now also go through the second-opinion dispatcher;
+  `SECOND_OPINION_DISPATCH` is required for NIM routes. NoteFactory's own NIM
+  rate limiter (30 RPM, two concurrent calls) and retry loop have been removed;
+  rate limiting and retries are handled by the dispatcher.
+
 ## [0.1.2] - 2026-10-08
 
 ### Added

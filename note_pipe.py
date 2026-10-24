@@ -25,7 +25,11 @@ sipher를 subprocess로 호출하지 않는다. sipher 실행은 셸 파이프 �
   `source_kind="text_post"` — `prompts/text/` 세트를 사용하며, 메타 구역을
   제외한 콘텐츠 문자열이 2,000자 미만이면 plan 패스를 생략한다
   (`TEXT_POST_PLAN_SKIP_THRESHOLD_CHARS`).
-- 둘 다 없으면 명시 에러로 종료한다(silent skip 금지, 계약 §8). text_post
+- 둘 다 없으면 명시 에러로 종료한다(silent skip 금지, 계약 §8). 단
+  `meta.transcript_label="no_speech"`이고 둘 다 빈 문자열이면 오류가 아니라
+  노트·모델 호출 없이 「합성할 소스 없음」 사실 안내와 종료 코드 3으로
+  끝나고, 배치(`note_batch.py`)는 실패가 아닌 별도 결과로 기록한다
+  (round-29-H2, `run()`). text_post
   경로는 docs/03 §C 2심제 판정 PASS 전까지 **실험/판정 대기** 상태다
   (docs/00-overview.md §3 참조) — round-03 시점 미검증이었던 것을 round-09가
   검증 후보로 정정한 것이며, 영구 제품 경계가 아니다.
@@ -294,6 +298,9 @@ COLLECTION_STATUS_MESSAGES: dict[str, str] = {
     "OCR_NOT_DOWNLOADED": "- OCR: 이미지를 내려받지 못해 문자 인식을 하지 못함",
     "OCR_SKIPPED_NO_PROVIDER": "- OCR: 문자 인식 도구가 없어 시도하지 않음",
     "OCR_FAILED": "- OCR: 문자 인식에 실패함",
+    "OCR_NOT_REQUESTED": (
+        "- OCR: 문자 인식을 끄고 수집해 이미지 속 글자는 노트에 들어 있지 않음"
+    ),
     "OCR_ABSENT": "- OCR: 수집 도구가 상태를 보고하지 않음",
     "OCR_UNREADABLE": "- OCR: 수집 도구가 보고한 상태를 해석할 수 없음",
     "OCR_MALFORMED_CONTAINER": (
@@ -378,6 +385,17 @@ COLLECTION_STATUS_MESSAGES: dict[str, str] = {
     "TRANSCRIPT_NOT_DOWNLOADED": "- 전사: 미디어를 내려받지 못해 전사하지 못함",
     "TRANSCRIPT_PARTIAL": "- 전사: 일부만 전사됨",
     "TRANSCRIPT_SKIPPED_NO_TOOL": "- 전사: 전사 도구가 없어 시도하지 않음",
+    "TRANSCRIPT_NO_AUDIO": "- 전사: 받은 영상에 오디오 트랙이 없어 전사할 음성이 없음",
+    "TRANSCRIPT_NOT_REQUESTED": (
+        "- 전사: 전사를 끄고 수집해 영상의 음성 내용은 노트에 들어 있지 않음"
+    ),
+    "TRANSCRIPT_NO_SPEECH": (
+        "- 전사: 영상을 전사했지만 말소리가 없어 음성 내용은 노트에 들어 있지 않음"
+    ),
+    "TRANSCRIPT_SKIPPED_AMBIENT_AUDIO": (
+        "- 전사: 이미지 게시물에 딸린 오디오를 배경음으로 보고 전사하지 않아 "
+        "그 소리는 노트에 들어 있지 않음"
+    ),
     "TRANSCRIPT_NONE_WITH_MEDIA": (
         "- 전사: 매체가 있으나 전사하지 않음(요청하지 않았거나 대상이 아님)"
     ),
@@ -393,7 +411,15 @@ _COLLECTION_STATUS_NOTICE = "※ 이 구역은 원문이 아니라 수집 도구
 _MAX_STATUS_COUNT = 10_000
 
 _OCR_LABEL_VOCAB = frozenset(
-    {"none", "not_downloaded", "done", "partial", "skipped_no_provider", "failed"}
+    {
+        "none",
+        "not_downloaded",
+        "done",
+        "partial",
+        "skipped_no_provider",
+        "failed",
+        "not_requested",
+    }
 )
 _COMMENTS_LABEL_VOCAB = frozenset(
     {
@@ -420,6 +446,10 @@ _TRANSCRIPT_LABEL_VOCAB = frozenset(
         "partial",
         "failed",
         "skipped_no_tool",
+        "no_audio",
+        "not_requested",
+        "no_speech",
+        "skipped_ambient_audio",
         "meta-missing",
         "meta-malformed",
     }
@@ -523,6 +553,17 @@ _SECURITY_WARNING = (
 
 class NotePipeError(RuntimeError):
     """스키마 검증 실패 등, 파이프 입력 단계에서 발생하는 명시 에러."""
+
+
+class NoSynthesisSourceNotice(Exception):
+    """합성할 소스가 없다는 사실 안내 — 실패가 아니다(round-29-H2).
+
+    `meta.transcript_label="no_speech"`이고 `transcript`·`body_text`가 둘 다 빈
+    수집물은 전사가 성공했지만 말소리가 없고 본문도 없는 것이다. `run()`이 노트를
+    쓰지 않고 모델도 부르지 않은 채 이 안내를 올리고, `main()`은 실패(1)·인자
+    오류(2)와 구별되는 종료 코드 3으로 끝낸다. `NotePipeError`의 하위가 아니다 —
+    그 계열을 잡는 실패 처리에 섞이지 않게 한다.
+    """
 
 
 class TruncatedNoteError(NotePipeError):
@@ -1144,9 +1185,9 @@ def assess_collection_status(data: dict) -> CollectionStatusAssessment:
 
     if partial_items:
         _append_collection_status(line_ids, source_lines, "OCR_TRUNCATED", partial_items)
-    if missing_ocr_items and ocr_label != "not_downloaded":
-        # 내려받기 실패는 더 구체적인 OCR_NOT_DOWNLOADED 한 줄로 표현한다.
-        # 실제 결손 수는 헤더의 ocr_missing_items에 계속 보존한다.
+    if missing_ocr_items and ocr_label not in {"not_downloaded", "not_requested"}:
+        # 내려받기 실패·OCR 미요청은 더 구체적인 OCR_NOT_DOWNLOADED·OCR_NOT_REQUESTED
+        # 한 줄로 표현한다. 실제 결손 수는 헤더의 ocr_missing_items에 계속 보존한다.
         _append_collection_status(line_ids, source_lines, "OCR_MISSING_ITEMS", missing_ocr_items)
     if ocr_label == "partial":
         if not missing_ocr_items and (not partial_items or expected_ocr_items is None):
@@ -1159,6 +1200,8 @@ def assess_collection_status(data: dict) -> CollectionStatusAssessment:
         _append_collection_status(line_ids, source_lines, "OCR_SKIPPED_NO_PROVIDER")
     if ocr_label == "failed":
         _append_collection_status(line_ids, source_lines, "OCR_FAILED")
+    if ocr_label == "not_requested":
+        _append_collection_status(line_ids, source_lines, "OCR_NOT_REQUESTED")
     if ocr_label == "absent":
         _append_collection_status(line_ids, source_lines, "OCR_ABSENT")
     if ocr_label in {"malformed", "unknown"} or partial_unreadable:
@@ -1466,6 +1509,14 @@ def assess_collection_status(data: dict) -> CollectionStatusAssessment:
         _append_collection_status(line_ids, source_lines, "TRANSCRIPT_PARTIAL")
     if transcript_label == "skipped_no_tool":
         _append_collection_status(line_ids, source_lines, "TRANSCRIPT_SKIPPED_NO_TOOL")
+    if transcript_label == "no_audio":
+        _append_collection_status(line_ids, source_lines, "TRANSCRIPT_NO_AUDIO")
+    if transcript_label == "not_requested":
+        _append_collection_status(line_ids, source_lines, "TRANSCRIPT_NOT_REQUESTED")
+    if transcript_label == "no_speech":
+        _append_collection_status(line_ids, source_lines, "TRANSCRIPT_NO_SPEECH")
+    if transcript_label == "skipped_ambient_audio":
+        _append_collection_status(line_ids, source_lines, "TRANSCRIPT_SKIPPED_AMBIENT_AUDIO")
     if transcript_label == "none" and _media_paths_have_audio_or_video(data):
         _append_collection_status(line_ids, source_lines, "TRANSCRIPT_NONE_WITH_MEDIA")
     if transcript_label in {"meta-missing", "meta-malformed"}:
@@ -1495,11 +1546,18 @@ def assess_collection_status(data: dict) -> CollectionStatusAssessment:
 
     # 단순 상태 미보고는 기존 정상 transcript의 byte-identical을 깨뜨릴 만큼의
     # 결손 증거가 아니다. 실제 실패·부분·모순·형식 이상만 조건부 부착한다.
+    # sipher v0.1.8의 오디오 없음·단계 미요청·말소리 없음·배경음 미전사도
+    # 수집 실패가 아닌 사실 안내다.
     non_deficit_ids = {
         "OCR_ABSENT",
+        "OCR_NOT_REQUESTED",
         "COMMENTS_ABSENT_BUT_PRESENT",
         "COMMENTS_ABSENT_EMPTY",
         "TRANSCRIPT_ABSENT",
+        "TRANSCRIPT_NO_AUDIO",
+        "TRANSCRIPT_NOT_REQUESTED",
+        "TRANSCRIPT_NO_SPEECH",
+        "TRANSCRIPT_SKIPPED_AMBIENT_AUDIO",
         "CONFIRMED_CLEAN",
         "STATUS_UNREPORTED",
     }
@@ -3489,6 +3547,9 @@ def _warn_if_models_dead() -> None:
             "`python tools/model_bench.py`로 품질을 재고 교체 여부를 정하십시오.",
             ", ".join(newer), DEFAULT_MODEL,
         )
+    elif report.get("newer_gemini_status"):
+        # 빈 목록이 "새 모델 없음"으로 읽히지 않게 한다 — 목록을 받지 못한 것이다.
+        logger.info("새 Gemini 모델 확인: %s", report["newer_gemini_status"])
     for row in report.get("rows", []):
         status = row.get("status")
         provider = row.get("provider")
@@ -3497,14 +3558,10 @@ def _warn_if_models_dead() -> None:
                 "⚠️ NIM 모델 혼잡: %s/%s — quota 소진이 아니라 일시 busy/접속량 상태입니다. 잠시 뒤 재시도하거나 무료 폴백을 사용합니다.",
                 provider, row.get("model"),
             )
-        elif status == "quota_limited" and provider == "gemini":
-            logger.warning(
-                "⚠️ Gemini 사용량 제한: %s/%s — API quota 또는 rate limit 응답입니다. 작가 우선 quota 정책을 유지하고 무료 NIM 폴백을 사용합니다.",
-                provider, row.get("model"),
-            )
         elif status == "busy" and provider == "gemini":
+            # 디스패처는 실패 본문을 주지 않아 quota 소진과 일시 혼잡을 가를 수 없다.
             logger.warning(
-                "⚠️ Gemini 일시 혼잡: %s/%s — quota 소진으로 단정하지 않은 일시 429입니다. 잠시 뒤 재시도하거나 무료 NIM 폴백을 사용합니다.",
+                "⚠️ Gemini 429: %s/%s — quota 소진과 일시 혼잡을 가를 수 없습니다. 작가 우선 quota 정책을 유지하고 잠시 뒤 재시도하거나 무료 NIM 폴백을 사용합니다.",
                 provider, row.get("model"),
             )
     if report.get("dead"):
@@ -3532,9 +3589,33 @@ def run(args: argparse.Namespace) -> Path:
     --vault 대상이 이미 존재하면 수 분짜리 하네스 실행(LLM 토큰 비용) 전에
     즉시 실패한다 — 실행 후 검증하면 토큰을 다 쓰고도 파일을 못 쓰는
     낭비가 생긴다.
+
+    Raises:
+        NoSynthesisSourceNotice: 빈 `no_speech` 수집물(round-29-H2). 헬스체크를
+            포함한 어떤 모델 호출보다 먼저 판정한다.
     """
-    _warn_if_models_dead()
     data = load_sipher_json(args.input)
+    # round-29-H2 — 빈 no_speech 수집물의 판정과 안내는 여기 한 곳에 있다.
+    # 전사는 됐지만 말소리가 없고 본문도 없다. 노트를 쓰지 않고, 헬스체크·
+    # 하네스·작가·critic 모델을 부르지 않는다. transcript가 없거나 null인 경우와
+    # 다른 라벨은 아래 build_note_source의 기존 NotePipeError 그대로다.
+    raw_meta = data.get("meta")
+    raw_transcript = data.get("transcript")
+    raw_body_text = data.get("body_text")
+    if (
+        isinstance(raw_meta, dict)
+        and raw_meta.get("transcript_label") == "no_speech"
+        and isinstance(raw_transcript, str)
+        and not raw_transcript.strip()
+        and isinstance(raw_body_text, str)
+        and not raw_body_text.strip()
+    ):
+        raise NoSynthesisSourceNotice(
+            "합성할 소스 없음 — 전사는 성공했지만 말소리가 없고"
+            "(transcript_label=no_speech) 본문(body_text)도 비어 있어 노트를 만들지 "
+            "않았습니다. 같은 입력으로 다시 실행해도 결과가 같습니다."
+        )
+    _warn_if_models_dead()
     # round-09 계약 §3 — 입력 어댑터: transcript 있으면 그대로(byte-identical),
     # 없고 body_text 있으면 text_post 합성 소스 구성. 둘 다 없으면 여기서
     # NotePipeError.
@@ -3807,6 +3888,10 @@ def main() -> None:
 
     try:
         output_path = run(args)
+    except NoSynthesisSourceNotice as notice:
+        # round-29-H2: 실패가 아닌 사실 안내 — 실패(1)·인자 오류(2)와 구별되는 3.
+        print(notice, file=sys.stderr)
+        raise SystemExit(3) from notice
     except (
         NotePipeError,
         FileNotFoundError,
