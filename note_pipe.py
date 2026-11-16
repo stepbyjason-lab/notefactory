@@ -119,7 +119,19 @@ from note_harness import (  # noqa: E402
     make_generate_fn,
     run_harness,
 )
-from note_validate import blocking_findings, check_inflation_ratio  # noqa: E402
+from note_regroup import (  # noqa: E402
+    RegroupError,
+    RegroupOutcome,
+    dedupe_lines,
+    regroup_chunk_notes,
+    strip_plan_leaks,
+    strip_process_traces,
+)
+from note_validate import (  # noqa: E402
+    blocking_findings,
+    check_inflation_ratio,
+    check_number_qualifiers,
+)
 from long_material import (  # noqa: E402
     LongMaterialPreparation,
     copy_with_writer_source,
@@ -1618,6 +1630,43 @@ def build_text_post_source(
     return content_text, final_text
 
 
+def _transcript_context_parts(data: dict, transcript: str) -> list[str]:
+    """전사 경로에서 전사와 함께 모델에 넘길 `[영상 정보]`·`[설명란]` 구역을 만든다.
+
+    설명란의 링크·이용 조건과 제목·채널·게시일은 전사에 없는 입력이다. 값이
+    없는 줄·구역은 만들지 않고, 설명란이 전사와 같으면 싣지 않는다.
+    """
+    parts: list[str] = []
+    meta = data.get("meta")
+    if isinstance(meta, dict):
+        title = meta.get("title")
+        channel = meta.get("channel") or meta.get("uploader") or meta.get("author")
+        raw_date = meta.get("upload_date") or meta.get("created_at_utc")
+        lines: list[str] = []
+        if isinstance(title, str) and title.strip():
+            lines.append(f"제목: {title.strip()}")
+        if isinstance(channel, str) and channel.strip():
+            lines.append(f"채널: {channel.strip()}")
+        date_match = (
+            re.match(r"^(\d{4})-?(\d{2})-?(\d{2})", raw_date.strip())
+            if isinstance(raw_date, str)
+            else None
+        )
+        if date_match:
+            lines.append(f"게시일: {'-'.join(date_match.groups())}")
+        if lines:
+            parts.append("[영상 정보]\n" + "\n".join(lines))
+
+    body_text = data.get("body_text")
+    if (
+        isinstance(body_text, str)
+        and body_text.strip()
+        and body_text.split() != transcript.split()
+    ):
+        parts.append(f"[설명란]\n{body_text.strip()}")
+    return parts
+
+
 def build_note_source(
     data: dict, *, collection_status: CollectionStatusAssessment | None = None
 ) -> tuple[str, str, str]:
@@ -1631,6 +1680,9 @@ def build_note_source(
     status = collection_status or assess_collection_status(data)
     if source_kind == "transcript":
         content_text = extract_transcript(data)
+        context_parts = _transcript_context_parts(data, content_text)
+        if context_parts:
+            content_text = "\n\n---\n\n".join([*context_parts, f"[전사]\n{content_text}"])
         source_url = data.get("source")
         if isinstance(source_url, str) and re.match(r"^https?://", source_url.strip(), re.IGNORECASE):
             content_text = f"[원문 URL]\n{source_url.strip()}\n\n---\n\n{content_text}"
@@ -1643,6 +1695,183 @@ def build_note_source(
         return source_kind, content_text, content_text
     content_text, final_text = build_text_post_source(data, collection_status=status)
     return source_kind, content_text, final_text
+
+
+#: 원래 전사가 이보다 길면 구간으로 나눠 쓴다. 2시간 강의(42,013자)를 한 번에 넣으면
+#: 같은 모델이 귀속·대상·필수선을 놓쳤고, 약 1만 자 구간으로 나누자 크게 나아졌다
+#: (round-33-H1 실측 `D:/Work/NoteFactory/round-33-H1/chunk-exp`).
+TRANSCRIPT_CHUNK_THRESHOLD_CHARS = 12_000
+TRANSCRIPT_CHUNK_CHARS = 10_000
+_CHUNK_TIME_RE = re.compile(r"^\[(\d{1,2}:\d{2}(?::\d{2})?)\]")
+_CHUNK_SENTENCE_END_RE = re.compile(r"(?<=[.?!])\s+")
+
+
+def _split_long_line(line: str) -> list[str]:
+    """구간보다 긴 한 줄(줄바꿈 없는 자막)을 문장 경계에서 구간 크기 이하로 자른다."""
+    if len(line) <= TRANSCRIPT_CHUNK_CHARS:
+        return [line]
+    pieces: list[str] = []
+    current = ""
+    for sentence in _CHUNK_SENTENCE_END_RE.split(line):
+        if current and len(current) + 1 + len(sentence) > TRANSCRIPT_CHUNK_CHARS:
+            pieces.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}" if current else sentence
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def split_transcript_chunks(transcript: str) -> list[str]:
+    """긴 전사를 줄 경계에서 약 `TRANSCRIPT_CHUNK_CHARS`자 구간으로 나눈다.
+
+    문턱보다 짧으면 한 구간 그대로다. 마지막 구간이 너무 짧으면 앞 구간에 붙인다.
+    """
+    # round-33-H1 재개 3: 줄바꿈 없는 한 줄 전사(표본 C, 19,406자 한 줄)는 문장 경계에서 자른다.
+    # ponytail: 문장 부호가 없는 긴 줄은 그대로 한 구간이 된다. 그런 입력이 오면 글자 수로 자른다.
+    if len(transcript) <= TRANSCRIPT_CHUNK_THRESHOLD_CHARS:
+        return [transcript]
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for line in (piece for raw in transcript.splitlines() for piece in _split_long_line(raw)):
+        if current and size + len(line) + 1 > TRANSCRIPT_CHUNK_CHARS:
+            chunks.append("\n".join(current))
+            current, size = [], 0
+        current.append(line)
+        size += len(line) + 1
+    if current:
+        chunks.append("\n".join(current))
+    if len(chunks) > 1 and len(chunks[-1]) < TRANSCRIPT_CHUNK_CHARS // 4:
+        tail = chunks.pop()
+        chunks[-1] = f"{chunks[-1]}\n{tail}"
+    return chunks
+
+
+def chunk_part_notice(index: int, total: int) -> str:
+    """구간 작가의 합성 소스 맨 앞에 넣는 한 줄 — 이 전사가 전체의 일부라는 사실."""
+    return (
+        f"[구간 안내] 이 전사는 한 강의를 {total}개 구간으로 나눈 것 가운데 {index + 1}번째 구간이다. "
+        "앞뒤 구간은 따로 정리되므로, 이 구간에 없는 내용이 강의에 없다는 뜻은 아니다."
+    )
+
+
+def _chunk_label(chunk: str, index: int) -> str:
+    times = [m.group(1) for line in chunk.splitlines() if (m := _CHUNK_TIME_RE.match(line))]
+    if times:
+        return f"{times[0]}–{times[-1]} 구간"
+    return f"{index + 1}구간"
+
+
+def merge_chunk_notes(notes: list[str], chunks: list[str]) -> str:
+    """구간 노트를 모델 호출 없이 하나로 합친다.
+
+    제목·출처 줄은 첫 구간 것을 한 번만 둔다. 구간마다 `## <시각> 구간` 아래에 그
+    구간의 도입과 절을 한 단계 내려 붙이고, 링크·한계 절은 끝에 하나로 모은다.
+    주제 재배열(`run_regroup_pass`)이 실패했을 때 쓰는 대체 경로다.
+    """
+    head: list[str] = []
+    body: list[str] = []
+    links: list[str] = []
+    limits: list[str] = []
+    for index, (note, chunk) in enumerate(zip(notes, chunks)):
+        section: str | None = None
+        block: list[str] = []
+        for line in note.strip().splitlines():
+            if line.startswith("# ") or line.startswith("**출처:**"):
+                if index == 0:
+                    head.append(line)
+                continue
+            if line.startswith("## "):
+                section = line[3:].strip()
+                if section != "링크와 원문 설명" and not section.startswith("한계"):
+                    block.append(f"#{line}")
+                continue
+            if section == "링크와 원문 설명":
+                links.append(line)
+            elif section is not None and section.startswith("한계"):
+                limits.append(line)
+            else:
+                block.append(f"#{line}" if line.startswith("### ") else line)
+        body.extend(["", f"## {_chunk_label(chunk, index)}", "", *strip_plan_leaks(block)[0]])
+    links, limits = dedupe_lines(links, links=True), dedupe_lines(limits)
+    tail: list[str] = []
+    if links:
+        tail.extend(["", "## 링크와 원문 설명", *links])
+    if limits:
+        tail.extend(["", "## 한계 및 미해결 질문", *limits])
+    return "\n".join([*head, *body, *tail]).strip() + "\n"
+
+
+def _merge_values(values: list[object]) -> object:
+    """구간별 메타 값 하나를 합친다 — 수는 더하고, 참거짓은 모두 참일 때만 참."""
+    first = values[0]
+    if all(isinstance(v, bool) for v in values):
+        return all(values)
+    if all(isinstance(v, int) and not isinstance(v, bool) for v in values):
+        return sum(values)  # type: ignore[arg-type]
+    if all(isinstance(v, list) for v in values):
+        return [item for v in values for item in v]  # type: ignore[union-attr]
+    if all(isinstance(v, str) and re.fullmatch(r"\d+/\d+", v) for v in values):
+        pairs = [tuple(map(int, v.split("/"))) for v in values]  # type: ignore[union-attr]
+        return f"{sum(p[0] for p in pairs)}/{sum(p[1] for p in pairs)}"
+    return first
+
+
+def run_regroup_pass(
+    notes: list[str], *, provider: str, model: str
+) -> tuple[RegroupOutcome, str]:
+    """구간 노트를 주제 기준으로 다시 묶는다(round-33-H1 재개 2). 작가와 같은 모델·무료 경로를 쓴다.
+
+    반환: (재배열 결과, 이 패스의 model_reported).
+    """
+    client = _RouteEvidenceClient(
+        build_harness_client(provider=provider, model=model, fallback_scope="writer"), role="writer"
+    )
+    sink: list[str] = []
+    generate_fn = _wrap_generate_fn_capturing_model_reported(make_generate_fn(client), sink)
+    outcome = regroup_chunk_notes(notes, generate_fn)
+    return outcome, aggregate_model_reported(sink)
+
+
+def check_part_qualifiers(result: HarnessResult, timeline: str) -> HarnessResult:
+    """전사 한 구간 노트의 숫자 한정어를 검사해 진단(meta·로그)에만 남긴다.
+
+    round-33-H1 재개 2: 걸린 구간을 다시 생성하거나 걸린 문장을 빼지 않는다 —
+    관문이 잘못 걸리면 맞는 정보까지 지웠다(실측 b-full-g2).
+    """
+    misses = check_number_qualifiers(result.note, timeline)
+    result.meta["qualifier_misses"] = list(misses)
+    return result
+
+
+def merge_chunk_results(results: list[HarnessResult], chunks: list[str]) -> HarnessResult:
+    """구간별 하네스 결과를 노트 하나의 결과로 합친다."""
+    # ponytail: 키마다 합치는 법을 값의 모양으로 정한다. 모양이 같아도 더하면 안 되는 키가 생기면 키별 규칙으로 바꾼다.
+    meta = {
+        key: _merge_values([r.meta[key] for r in results])
+        if all(key in r.meta for r in results)
+        else results[0].meta[key]
+        for key in results[0].meta
+    }
+    meta["transcript_chunks"] = len(results)
+    tokens = {
+        key: _merge_values([r.tokens[key] for r in results])
+        if all(key in r.tokens for r in results)
+        else results[0].tokens[key]
+        for key in results[0].tokens
+    }
+    verified = all(r.verified for r in results)
+    meta["verified"] = verified
+    return HarnessResult(
+        note=merge_chunk_notes([r.note for r in results], chunks),
+        meta=meta,
+        findings=[f for r in results for f in r.findings],
+        tokens=tokens,
+        verified=verified,
+        passes_run=[p for r in results for p in r.passes_run],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1981,6 +2210,21 @@ def aggregate_model_reported(observed_values: list[str]) -> str:
 
     escaped = [_escape_mixed_value(v) for v in distinct]
     return "mixed(" + ",".join(escaped) + ")"
+
+
+def _observed_model_reported(labels: list[str]) -> list[str]:
+    """패스 묶음마다 `aggregate_model_reported`로 접은 라벨을 관측 값 목록으로 되편다.
+
+    "not-tracked"는 관측 0건이라 값을 내지 않는다. 되편 목록을 다시 합치면 묶음의 원시
+    관측 값을 한 번에 합친 것과 같은 라벨이 된다(합산은 처음 나온 순서의 서로 다른 값만 본다).
+    """
+    observed: list[str] = []
+    for label in labels:
+        if label == "not-tracked":
+            continue
+        values = parse_mixed_model_reported(label)
+        observed.extend(values if values is not None else [label])
+    return observed
 
 
 class MalformedMixedLabelError(NotePipeError):
@@ -2828,6 +3072,7 @@ def run_note_harness(
     long_material_preparation: LongMaterialPreparation | None = None,
     long_material_fallback_transcript: str | None = None,
     quality_fixture: dict[str, object] | None = None,
+    timeline_source: str | None = None,
 ) -> tuple[HarnessResult, float, str]:
     """프로파일에 맞춰 `run_harness`를 구동한다.
 
@@ -2838,6 +3083,8 @@ def run_note_harness(
         source_kind: `"transcript"`(기본, 회귀 없음) | `"text_post"`(계약
             §3). text_post면 `prompts/text/` 세트를 주입하고, 합성 소스가
             2,000자 미만이면 plan 패스를 생략한다.
+        timeline_source: 전사 경로의 원래 전사. 합성 소스에 실린 설명란의
+            시각·번호가 시각·구조 검사에 섞이지 않게 하네스에 따로 넘긴다.
         content_source_text: `[수집 상태]` 구역을 제외한 콘텐츠 문자열.
             text_post plan-skip 길이는 이 값을 재며, `None`이면 기존 호출자
             하위호환을 위해 `transcript`를 사용한다.
@@ -3088,11 +3335,17 @@ def run_note_harness(
             # 시간 예산으로 바꾸지 않는 이유: 수렴은 1~2회차에 일어나고, 2회면 최악도
             # 유계다(가장 느린 모델의 repair 1회가 72초). 시간으로 재는 장치를 더
             # 얹어도 살 게 없다.
-            repair_budget=2,
+            #
+            # round-33-H1(2026-11-13): 전사 경로는 0회다. 같은 모델의 repair가
+            # K-023에서 두 번 다 노트를 악화시켰다(같은 제목 절 중복, 지시문 누출,
+            # 전사에 없는 필수선). 전사 경로의 critic 지적은 고쳐 쓰지 않고
+            # 메타(`critic_findings`)로만 남긴다. text_post는 그대로 2회.
+            repair_budget=0 if source_kind == "transcript" else 2,
             prompts_dir=prompts_dir,
             synthesis_prompt_override=synthesis_prompt_override,
             source_contract_prompt=source_contract_prompt,
             contract_findings_fn=contract_findings_fn,
+            timeline_source=timeline_source,
         )
     except TruncationSuspectedError as exc:
         # truncation 하드-스톱(승격 팩토리) — 부분 산출을 신뢰하지 않고 즉시
@@ -3131,6 +3384,7 @@ def run_note_harness(
                 paid_context=paid_context,
                 long_material_preparation=None,
                 quality_fixture=quality_fixture,
+                timeline_source=timeline_source,
             )
     model_reported = aggregate_model_reported(model_reported_sink)
     # The final note body comes from the last writer response (synthesis or
@@ -3716,20 +3970,104 @@ def run(args: argparse.Namespace) -> Path:
         harness_kwargs["long_material_fallback_transcript"] = original_transcript_for_fallback
     if quality_fixture is not None:
         harness_kwargs["quality_fixture"] = quality_fixture
-    result, elapsed_seconds, model_reported = run_note_harness(
-        transcript,
-        provider=route.provider,
-        model=route.model,
-        profile=args.profile,
-        source_kind=source_kind,
-        content_source_text=content_source_text,
-        critic_provider=args.critic_provider,
-        critic_model=args.critic_model,
-        use_premium_arbiter=(
+    if source_kind == "transcript":
+        # 합성 소스는 설명란·영상 정보를 함께 싣는다. 시각·구조 검사는 경계
+        # 문자열로 잘라 내지 않고 원래 전사를 따로 받는다(round-33-H1 F1 격리).
+        harness_kwargs["timeline_source"] = extract_transcript(data)
+    harness_call: dict[str, object] = {
+        "provider": route.provider,
+        "model": route.model,
+        "profile": args.profile,
+        "source_kind": source_kind,
+        "critic_provider": args.critic_provider,
+        "critic_model": args.critic_model,
+        "use_premium_arbiter": (
             route.use_premium_arbiter and not bool(getattr(args, "no_premium_arbiter", False))
         ),
-        **harness_kwargs,
+    }
+    chunks = (
+        split_transcript_chunks(harness_kwargs["timeline_source"])  # type: ignore[arg-type]
+        if source_kind == "transcript" and quality_fixture is None
+        else []
     )
+    if len(chunks) > 1:
+        # round-33-H1 — 긴 전사는 구간마다 따로 쓰고 기계적으로 합친다. 설명란은 첫 구간에만 싣는다.
+        chunk_results: list[HarnessResult] = []
+        elapsed_seconds = 0.0
+        reported: list[str] = []
+        for index, chunk in enumerate(chunks):
+            chunk_data = {**data, "transcript": chunk, **({"body_text": ""} if index else {})}
+            _kind, chunk_content, chunk_source = build_note_source(
+                chunk_data, collection_status=collection_status
+            )
+            # 구간 작가가 자기 몫이 일부라는 걸 모르면 「전사가 1~6단계만 다룬다」 같은
+            # 사실과 다른 한계 줄을 쓴다(round-33-H1 표본 C).
+            chunk_source = "\n\n".join([chunk_part_notice(index, len(chunks)), chunk_source])
+            chunk_result, chunk_elapsed, chunk_reported = run_note_harness(
+                chunk_source,
+                content_source_text=chunk_content,
+                **harness_call,  # type: ignore[arg-type]
+                **{**harness_kwargs, "timeline_source": chunk},
+            )
+            chunk_results.append(check_part_qualifiers(chunk_result, chunk))
+            elapsed_seconds += chunk_elapsed
+            reported.append(chunk_reported)
+        result = merge_chunk_results(chunk_results, chunks)
+        # round-33-H1 재개 2 — 합친 노트를 주제 기준으로 다시 묶는다. 실패하면 구간 순서 병합을 쓴다.
+        try:
+            regroup, regroup_reported = run_regroup_pass(
+                [r.note for r in chunk_results], provider=route.provider, model=route.model
+            )
+        except (
+            RegroupError,
+            HarnessError,
+            AllProvidersFailedError,
+            NoActiveProviderError,
+            StreamingUnavailableError,
+        ) as exc:
+            logger.warning("regroup: 주제 재배열 실패 — 구간 순서 병합을 그대로 쓴다: %s", exc)
+            result.meta["regroup"] = {"failed": str(exc)}
+            spent = getattr(exc, "tokens", {})
+        else:
+            result.note = regroup.note
+            result.meta["regroup"] = regroup.diagnostics
+            result.passes_run.append("regroup")
+            reported.append(regroup_reported)
+            spent = regroup.tokens
+            logger.info("regroup: %s", json.dumps(regroup.diagnostics, ensure_ascii=False))
+        result.tokens = {
+            key: _merge_values([value, spent[key]]) if key in spent else value
+            for key, value in result.tokens.items()
+        }
+        # round-33-H1 리뷰 수리 2 — 코드가 넣은 구간 안내 표지 문장과 자리표시 주소 줄만 지운다.
+        result.note, traces = strip_process_traces(result.note, transcript)
+        result.meta["process_traces_removed"] = traces
+        logger.info("process traces removed: %s", json.dumps(traces, ensure_ascii=False))
+        # 리뷰 F3 — 구간·재배열 라벨을 관측 값으로 되펴 한 번만 합친다. 헤더는 단일 값이나
+        # parse_mixed_model_reported가 되읽는 mixed(...)가 된다.
+        model_reported = aggregate_model_reported(_observed_model_reported(reported))
+    else:
+        result, elapsed_seconds, model_reported = run_note_harness(
+            transcript,
+            content_source_text=content_source_text,
+            **harness_call,  # type: ignore[arg-type]
+            **harness_kwargs,
+        )
+        if source_kind == "transcript" and quality_fixture is None:
+            check_part_qualifiers(result, str(harness_kwargs["timeline_source"]))
+    if result.meta.get("critic_findings"):
+        # round-33-H1: 전사 경로는 critic 지적을 고쳐 쓰지 않으므로 진단으로 남긴다.
+        logger.info(
+            "critic_findings: %s",
+            json.dumps(result.meta["critic_findings"], ensure_ascii=False),
+        )
+    if result.meta.get("qualifier_misses"):
+        # 진단 전용 — 노트는 그대로 두고 걸린 문장만 기록한다.
+        logger.info(
+            "qualifier gate(진단): %d건 — %s",
+            len(result.meta["qualifier_misses"]),
+            json.dumps(result.meta["qualifier_misses"], ensure_ascii=False),
+        )
 
     text = result.note
     char_count = len(text)

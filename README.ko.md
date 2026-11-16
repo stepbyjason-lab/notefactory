@@ -2,7 +2,7 @@
 
 # NoteFactory
 
-> **현재 공개 버전: v0.1.3**
+> **현재 공개 버전: v0.1.4**
 
 Sipher가 정규화한 JSON을 한국어 지식노트 Markdown으로 바꾸는 로컬 파이프라인입니다.
 
@@ -20,6 +20,8 @@ Sipher는 원문을 수집하고 수집 상태를 정직하게 라벨링합니�
 
 - Sipher 8-key 정규화 JSON을 파일 또는 stdin으로 읽습니다.
 - writer → 결정적 gate → critic → 필요 시 repair 순서로 노트를 만듭니다.
+- 1만 2천 자가 넘는 영상 전사는 구간마다 노트를 만든 뒤 주제별로 다시 묶습니다. 전사 경로에서는
+  critic 지적을 진단으로 남기고 같은 모델로 고쳐 쓰지 않습니다.
 - URL과 설명, 원문 번호 순서, 긴 프롬프트·템플릿·코드 같은 복사용 자료를 보전합니다.
 - 노트 헤더에 source, 모델 route, 실행 패스, 토큰 보고, `verified` 상태를 남깁니다.
 - 무료 writer 후보 목록을 순서대로 시도하고 실제 fallback을 정직하게 기록합니다.
@@ -108,7 +110,7 @@ Critic
 
 기본 Gemini와 OpenRouter를 포함한 모든 API 경로는 second-opinion 디스패처를 거치며,
 Node.js와 0단계에서 설정한 프로세스 환경변수 `SECOND_OPINION_DISPATCH`가 필요합니다.
-v0.1.3부터 NVIDIA NIM 호출도 같은 경로를 사용합니다. NIM 경로를 쓰려면
+NVIDIA NIM 호출도 같은 경로를 사용합니다. NIM 경로를 쓰려면
 `NVIDIA_NIM_API_KEY`를 입력합니다.
 
 ### 3. Sipher로 입력 수집
@@ -157,7 +159,7 @@ python note_pipe.py source.json --out notes_out --profile light
 
 전체 옵션은 `python note_pipe.py --help`를 확인하세요.
 
-`--vault`는 v0.1.3에서 maintainer의 로컬 Windows 경로에 연결된 내부 개발 통합입니다.
+`--vault`는 maintainer의 로컬 Windows 경로에 연결된 내부 개발 통합입니다.
 공개 사용자는 항상 명시적인 `--out` 디렉터리를 사용하세요.
 
 ## 원문 보전 원칙
@@ -176,6 +178,10 @@ NoteFactory는 실제 누락과 자연스러운 표현 차이를 분리합니다
 
 - 무료 provider의 busy, timeout, quota는 언제든 달라질 수 있습니다.
 - `verified`는 원문 보전 gate 상태이지 새로운 모델의 의미 품질을 자동 보증하는 점수가 아닙니다.
+- 전사 노트에는 알려진 한계가 있습니다. 한정어가 빠질 수 있고, 시각은 발언 부근을
+  가리키며, 단계형 강의는 단계별 내용이 줄 수 있고, 구간 경계의 내용이 두 번 나올 수 있습니다.
+  표지 없이 구간 안내를 되받은 문장과 원문에 없는 실제 형식의 주소는 지우지 않습니다.
+  `CHANGELOG.md`를 참고하세요.
 - 공개 콘텐츠 또는 provider 전송 위험을 수용할 수 있는 자료만 넣으세요.
 - 키는 `.env.local`에만 두고 커밋·터미널·결과 파일에 넣지 마세요. starter 설정 밖의
   provider를 직접 추가할 때는 해당 provider의 과금·약관도 별도로 확인하세요.

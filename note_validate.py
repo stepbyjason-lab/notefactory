@@ -88,7 +88,7 @@ _HMS_COMMA_MS_RE = re.compile(
 #: 콜론 3그룹(`A:B:C`) — deepseek(MM:SS:ms 오기) / opus·codex(HH:MM:SS) 공용
 #: 패턴. 세 번째 그룹 값으로 실제 의미를 휴리스틱 분기한다(모듈 docstring 참조).
 _THREE_COLON_GROUPS_RE = re.compile(
-    r"^(?P<g1>\d{1,2}):(?P<g2>\d{2}):(?P<g3>\d{2,3})$"
+    r"^(?P<g1>\d{1,2}):(?P<g2>\d{1,2}):(?P<g3>\d{2,3})$"
 )
 
 #: 콜론 2그룹(`MM:SS`).
@@ -155,7 +155,7 @@ class Finding:
 
     Attributes:
         kind: 발견 종류. "ts_normalized" | "uncertain_ts" | "ts_removed" |
-            "completeness" | "structure".
+            "ts_unparseable_removed" | "completeness" | "structure".
         detail: 사람이 읽을 수 있는 상세 설명(값·개수 등).
         context: 해당 발견의 주변 문맥(발췌). 없으면 빈 문자열.
     """
@@ -223,7 +223,7 @@ def parse_transcript_timestamps(transcript: str) -> list[int]:
 def _classify_ts_body(body: str) -> tuple[int, int, int] | None:
     """`[t=...]` 안쪽 문자열을 (h, m, s) 튜플로 분류한다.
 
-    파싱 불가·불확실 마커면 None을 반환한다(호출자가 uncertain_ts로 처리).
+    파싱 불가면 None을 반환한다(호출자가 ts_unparseable_removed로 지운다).
     """
     stripped = body.strip()
 
@@ -256,6 +256,10 @@ def normalize_timestamps(note: str) -> tuple[str, list[Finding]]:
     불확실 마커(`xx` 포함, 예: `[t=01:55:xx? ...]`)는 그대로 두고
     kind="uncertain_ts" finding만 남긴다(값을 지어내지 않는다).
     파싱 가능한 값은 재작성 후 kind="ts_normalized" finding을 남긴다.
+    한 괄호에 쉼표로 이은 여러 시각(`[t=00:49:01, 00:50:07]`)은 값마다 정규화해
+    `[t=HH:MM:SS, t=HH:MM:SS]`로 쓴다. 읽을 수 없는 값(`02:22:0`처럼 잘린 값)은
+    추정해 채우지 않고 지운다 — kind="ts_unparseable_removed"(round-33-H1 재개 2:
+    그대로 두었더니 깨진 표기가 노트에 남았다).
     """
     findings: list[Finding] = []
 
@@ -269,17 +273,21 @@ def normalize_timestamps(note: str) -> tuple[str, list[Finding]]:
             )
             return original
 
-        parsed = _classify_ts_body(body)
-        if parsed is None:
-            # 파싱 불가능한 값도 창작하지 않고 그대로 둔다 — uncertain 취급.
-            findings.append(
-                Finding(kind="uncertain_ts", detail=original, context=original)
-            )
-            return original
-
-        h, m, s = parsed
-        canonical = f"[t={h:02d}:{m:02d}:{s:02d}]"
-        if canonical != original:
+        values: list[str] = []
+        for part in body.split(","):
+            part = part.strip()
+            part = part[2:].strip() if part.startswith("t=") else part
+            parsed = _classify_ts_body(part)
+            if parsed is None:
+                # 창작하지 않는다 — 읽을 수 없는 값은 지우고 기록만 남긴다.
+                findings.append(
+                    Finding(kind="ts_unparseable_removed", detail=part, context=original)
+                )
+                continue
+            h, m, s = parsed
+            values.append(f"t={h:02d}:{m:02d}:{s:02d}")
+        canonical = f"[{', '.join(values)}]" if values else ""
+        if values and canonical != original:
             findings.append(
                 Finding(kind="ts_normalized", detail=f"{original} -> {canonical}")
             )
@@ -552,6 +560,7 @@ GATE_FINDING_TIER: dict[str, str] = {
     "source_url": "retry",
     "source_enumeration": "retry",
     "uncertain_ts": "flag",
+    "ts_unparseable_removed": "flag",
     "ts_normalized": "flag",
     "transcript_no_timestamps": "flag",
 }
@@ -1128,6 +1137,7 @@ def run_gates(
     plan_topic_items: list[tuple[str, list[str]]] | None = None,
     enforce_topic_sections: bool = True,
     structure_profile: str = "legacy",
+    timeline_source: str | None = None,
 ) -> GateResult:
     """게이트 (a)~(d)를 순서대로 실행하고 정규화+정제된 노트와 findings를 묶는다.
 
@@ -1148,13 +1158,18 @@ def run_gates(
             제목 대조는 "섹션을 만들었는가", 이쪽은 "속을 채웠는가"를 잰다.
         structure_profile: `"functional"`이면 자유 `## ` 구조의 조직화·topic
             커버 게이트, 그 외에는 기존 Learning Path 게이트를 실행한다.
+        timeline_source: 타임스탬프와 번호 서열을 대조할 원래 전사. 합성 소스가
+            설명란 같은 다른 입력을 함께 실을 때 넘긴다 — 그 입력의 시각·번호가
+            전사의 것으로 섞이지 않게 하기 위해서다. None이면 `transcript` 전체가 전사다.
     """
     findings: list[Finding] = []
 
     normalized_note, normalize_findings = normalize_timestamps(note)
     findings.extend(normalize_findings)
 
-    transcript_seconds = parse_transcript_timestamps(transcript)
+    transcript_seconds = parse_transcript_timestamps(
+        transcript if timeline_source is None else timeline_source
+    )
     # "전사에서 타임스탬프를 하나도 못 찾음"(파싱 실패/무타임스탬프 전사)과
     # "노트 타임스탬프가 전부 틀림"은 후속 조치가 다르다 — 전자를 구분 가능하게
     # meta에 전사 측 개수를 기록하고, 노트에 [t=]가 있는데 전사 측이 0이면
@@ -1198,7 +1213,7 @@ def run_gates(
     )
     source_url_findings, source_urls_meta = check_source_urls(transcript, verified_note)
     source_enumeration_findings, source_enumeration_meta = check_source_enumeration(
-        transcript, verified_note
+        transcript if timeline_source is None else timeline_source, verified_note
     )
     findings.extend(literal_artifact_findings)
     findings.extend(source_url_findings)
@@ -1234,3 +1249,166 @@ def run_gates(
     }
 
     return GateResult(note=verified_note, findings=findings, meta=meta)
+
+
+# ---------------------------------------------------------------------------
+# round-33-H1 — 숫자 한정어 관문(전사 경로 구간별)
+# ---------------------------------------------------------------------------
+#
+# 노트 문장에 숫자가 있으면, 그 문장의 시각 ±15초 전사에서 같은 숫자를 찾아
+# 전사에서 그 숫자에 붙은 한정어(단위·기간·조건·강도)가 노트 문장에 남았는지
+# 본다. 다른 시각에 나온 같은 숫자와는 섞지 않는다 — 노트 시각에 가장 가까운
+# 전사 줄만 쓴다. 한정어는 같은 뜻의 말끼리 묶어, 노트가 그 묶음의 어느 말이든
+# 쓰면 지킨 것으로 본다(「많아봐야 3달」 → 「최대 3달」은 통과).
+
+#: 한정어 묶음 — 일반 한국어 표현만 둔다(특정 강의 문구를 넣지 않는다). 같은 뜻의
+#: 말은 한 묶음이다 — 「최소 15개」와 「15개 이상」, 「많아봐야 3달」과 「최대 3달」.
+QUALIFIER_GROUPS: dict[str, tuple[str, ...]] = {
+    "하루": ("하루에", "하루 ", "하루당", "매일", "일일", "날마다"),
+    "주": ("매주", "일주일에", "한 주에", "주당"),
+    "달": ("한 달에", "한달에", "매달", "매월", "월간"),
+    "해": ("1년에", "일 년에", "한 해에", "매년", "연간"),
+    "하한": ("최소", "적어도", "최저", "이상", "넘게", "넘는", "넘어", "초과"),
+    "상한": ("최대", "많아봐야", "많아야", "기껏", "길어야", "이하", "미만", "안 넘", "안넘", "이내", "까지만"),
+    "필수": ("무조건", "반드시", "꼭", "절대", "필수"),
+    "처음": ("처음", "첫"),
+    "가장": ("가장", "베스트", "제일", "최선"),
+}
+# 「씩」·「만에」처럼 빠져도 뜻이 거의 같은 말과, 「3달에」·「10월에」처럼 숫자 자기
+# 단위와 겹치는 「달에」·「년에」는 묶음에 넣지 않는다 — 오탐으로 멀쩡한 문장을 뺀다.
+_PERIOD_GROUPS = ("하루", "주", "달", "해")
+
+QUALIFIER_WINDOW_SECONDS = 15
+#: 숫자 줄 안에서는 숫자 가까이 붙은 한정어만 그 숫자 몫으로 본다 — 한정어 끝에서
+#: 숫자까지 이 글자 수 안(「최소한 보는 게 한 15개」), 숫자 끝에서 한정어까지 이 글자
+#: 수 안(「20% 이하」). 같은 줄 앞 절의 「절대 못 …」을 끌어오지 않으려는 것이다.
+QUALIFIER_BEFORE_CHARS = 10
+QUALIFIER_AFTER_CHARS = 6
+#: 기간 한정어는 STT 줄이 갈려 숫자보다 한두 줄 앞에 오는 일이 잦다(「하루에 몇 개씩
+#: / … / 최소 / 40개」). 숫자 줄에 자기 기간 단위가 없을 때만, 앞 이 초 안의 줄을
+#: 최대 이 수만큼 보며, 그 줄의 마지막 숫자 뒤쪽만 본다(앞쪽은 그 숫자 몫이다).
+# ponytail: 앞줄은 시간·줄 수로만 묶는다 — 화자가 고쳐 말한 기간(「매달이 아니죠 2-3주」)은 숫자 줄의 기간 단위로만 걸러진다. 오탐이 실측되면 절 경계로 묶는다.
+QUALIFIER_LOOKBACK_SECONDS = 20
+QUALIFIER_LOOKBACK_LINES = 3
+
+_TRANSCRIPT_LINE_RE = re.compile(r"^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.*)$")
+_NOTE_TS_BLOCK_RE = re.compile(r"\[t=[^\]]*\]")
+_NOTE_TS_RE = re.compile(r"t=(\d{1,2}:\d{2}(?::\d{2})?)")
+_NUMBER_RE = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)")
+_THOUSANDS_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+#: 숫자 바로 뒤에 기간 단위가 붙으면(「2-3주마다」, 「3달」) 그 숫자는 스스로 기간을 말한다.
+_OWN_PERIOD_AFTER_RE = re.compile(r"\s*(?:[-~]\s*\d+(?:\.\d+)?)?\s*(?:일|주|달|개월|년)")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=\S)")
+
+
+def _ts_seconds(value: str) -> int:
+    parts = [int(p) for p in value.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    return parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def _qualifier_groups_in(text: str, names: tuple[str, ...] | None = None) -> set[str]:
+    return {
+        name
+        for name, words in QUALIFIER_GROUPS.items()
+        if (names is None or name in names) and any(w in text for w in words)
+    }
+
+
+def _qualifiers_near_number(text: str, number: str) -> set[str]:
+    found: set[str] = set()
+    for num in _NUMBER_RE.finditer(text):
+        if num.group() != number:
+            continue
+        for name, words in QUALIFIER_GROUPS.items():
+            for word in words:
+                for occ in re.finditer(re.escape(word), text):
+                    if (
+                        0 <= num.start() - occ.end() <= QUALIFIER_BEFORE_CHARS
+                        or 0 <= occ.start() - num.end() <= QUALIFIER_AFTER_CHARS
+                    ):
+                        found.add(name)
+    return found
+
+
+def _note_sentences(note: str) -> list[str]:
+    sentences: list[str] = []
+    for line in note.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        sentences.extend(s for s in _SENTENCE_SPLIT_RE.split(line.strip()) if s)
+    return sentences
+
+
+def _required_qualifiers(
+    lines: list[tuple[int, str]], index: int, number: str
+) -> tuple[set[str], str]:
+    sec, text = lines[index]
+    required = _qualifiers_near_number(text, number)
+    context = [text]
+    own_period = any(
+        num.group() == number and _OWN_PERIOD_AFTER_RE.match(text, num.end())
+        for num in _NUMBER_RE.finditer(text)
+    )
+    if own_period:
+        # 화자가 고쳐 말한 기간(「매달이 아니죠, 2-3주마다」)을 끌어오지 않는다.
+        required -= set(_PERIOD_GROUPS)
+    else:
+        for back in range(index - 1, max(-1, index - 1 - QUALIFIER_LOOKBACK_LINES), -1):
+            back_sec, back_text = lines[back]
+            if sec - back_sec > QUALIFIER_LOOKBACK_SECONDS:
+                break
+            digits = list(_NUMBER_RE.finditer(back_text))
+            tail = back_text[digits[-1].end():] if digits else back_text
+            required |= _qualifier_groups_in(tail, _PERIOD_GROUPS)
+            context.insert(0, back_text)
+    return required, " ".join(context)
+
+
+def check_number_qualifiers(note: str, transcript: str) -> list[dict[str, object]]:
+    """노트 문장이 전사 숫자의 한정어를 잃었으면 그 문장을 돌려준다.
+
+    전사가 `[HH:MM:SS] 말` 줄 형식이 아니거나 문장에 `[t=…]` 시각이 없으면
+    대조할 근거가 없으므로 검사하지 않는다.
+    """
+    lines = [
+        (_ts_seconds(m.group(1)), _THOUSANDS_RE.sub("", m.group(2)))
+        for raw in transcript.splitlines()
+        if (m := _TRANSCRIPT_LINE_RE.match(raw.strip()))
+    ]
+    if not lines:
+        return []
+    misses: list[dict[str, object]] = []
+    for sentence in _note_sentences(note):
+        times = [_ts_seconds(t) for t in _NOTE_TS_RE.findall(sentence)]
+        if not times:
+            continue
+        body = _THOUSANDS_RE.sub("", _NOTE_TS_BLOCK_RE.sub("", sentence))
+        note_groups = _qualifier_groups_in(body)
+        for number in dict.fromkeys(_NUMBER_RE.findall(body)):
+            candidates = [
+                (min(abs(sec - t) for t in times), index)
+                for index, (sec, text) in enumerate(lines)
+                if min(abs(sec - t) for t in times) <= QUALIFIER_WINDOW_SECONDS
+                and number in _NUMBER_RE.findall(text)
+            ]
+            if not candidates:
+                continue
+            nearest = min(dt for dt, _ in candidates)
+            missing: set[str] = set()
+            context: list[str] = []
+            for dt, index in candidates:
+                if dt != nearest:
+                    continue
+                required, text = _required_qualifiers(lines, index, number)
+                context.append(text)
+                missing |= required - note_groups
+            if missing:
+                misses.append({
+                    "sentence": sentence,
+                    "number": number,
+                    "missing": sorted(missing),
+                    "transcript": context,
+                })
+    return misses

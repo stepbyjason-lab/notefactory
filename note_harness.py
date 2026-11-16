@@ -1644,9 +1644,12 @@ def _run_plan_pass(
     *,
     prompts_dir: Path,
     plan_prompt_override: str | None = None,
+    segment_source: str | None = None,
 ) -> tuple[dict, PassUsage]:
     """Plan 패스 — 구조 개요를 추출한다. JSON·md 둘 다 받고, 둘 다 실패하면
-    1회 재시도 후 하드 에러(round-04 "silent 진행 금지" 유지)."""
+    1회 재시도 후 하드 에러(round-04 "silent 진행 금지" 유지).
+
+    `segment_source`가 있으면 구조 앵커는 그것에서 센다(None이면 `transcript`)."""
     system_prompt = (
         plan_prompt_override
         if plan_prompt_override is not None
@@ -1654,7 +1657,9 @@ def _run_plan_pass(
     )
 
     # §A — topic 개수를 소스가 정하게 한다. 표지가 없으면 앵커 없이 간다.
-    segments = detect_source_segments(transcript)
+    segments = detect_source_segments(
+        transcript if segment_source is None else segment_source
+    )
     user_message = transcript
     if segments is not None:
         count, _kind = segments
@@ -1927,11 +1932,15 @@ def run_harness(
     sentence_quality_report_enabled: bool | None = None,
     source_contract_prompt: str | None = None,
     contract_findings_fn: Callable[[str], list[Finding]] | None = None,
+    timeline_source: str | None = None,
 ) -> HarnessResult:
     """전사(또는 기존 노트)로부터 계측형 하네스 전체 파이프를 실행한다.
 
     Args:
         transcript: 전사 원문.
+        timeline_source: 합성 소스가 설명란 같은 다른 입력을 함께 실을 때의
+            원래 전사. 타임스탬프 대조·구조 표지 계수·밀도 판정은 이것만 본다.
+            None이면 `transcript` 전체가 전사다.
         generate_fn: `(prompt, *, system_prompt) -> dict` 콜러블(free_llm.generate
             형태 dict를 반환). plan/synthesis/repair 패스에서 재사용된다.
         plan: True면 Plan 패스를 먼저 실행하고 완전성 게이트의 하한 계약으로
@@ -1972,14 +1981,15 @@ def run_harness(
     """
     if sentence_quality_report_enabled is not None:
         copy_quality_report_enabled = sentence_quality_report_enabled
-    structure_profile = "functional" if prompts_dir == TEXT_PROMPTS_DIR else "legacy"
+    structure_profile = "functional"
     passes_run: list[str] = []
     pass_usages: list[PassUsage] = []
     plan_topic_count: int | None = plan_topic_count_override
     plan_topics: list[str] | None = plan_topics_override
     plan_topic_items: list[tuple[str, list[str]]] = []
     # §B — 라벨 나열(D1)이면 topic 1:1 섹션 계약을 적용하지 않는다.
-    enforce_topic_sections = classify_source_density(transcript) != "D1"
+    structure_source = transcript if timeline_source is None else timeline_source
+    enforce_topic_sections = classify_source_density(structure_source) != "D1"
     source_block_densities: dict[str, str] = {}
 
     if initial_note is not None:
@@ -1992,6 +2002,7 @@ def run_harness(
                 generate_fn,
                 prompts_dir=prompts_dir,
                 plan_prompt_override=plan_prompt_override,
+                segment_source=timeline_source,
             )
             passes_run.append("plan")
             pass_usages.append(plan_usage)
@@ -2038,6 +2049,7 @@ def run_harness(
         plan_topic_items=plan_topic_items,
         enforce_topic_sections=enforce_topic_sections,
         structure_profile=structure_profile,
+        timeline_source=timeline_source,
     )
     passes_run.append("gate")
     note = gate_result.note
@@ -2090,6 +2102,7 @@ def run_harness(
             plan_topic_items=plan_topic_items,
             enforce_topic_sections=enforce_topic_sections,
             structure_profile=structure_profile,
+            timeline_source=timeline_source,
         )
         passes_run.append("gate")
         note = gate_result.note
@@ -2122,6 +2135,9 @@ def run_harness(
     meta: dict[str, object] = dict(gate_result.meta)
     meta["grounding_flags"] = critic_findings_count
     meta["grounding_repair_attempted"] = critic_repair_attempted_count
+    # round-33-H1: repair를 돌리지 않는 경로(전사)에서도 critic이 지적한 문장을
+    # 버리지 않고 진단으로 남긴다.
+    meta["critic_findings"] = list(critic_findings_for_copy_report)
     meta["passes_run"] = passes_run
     meta["verified"] = verified
     # round-06 G5 P0-B: plan topic 라벨을 meta에 노출한다 — poc/run_sweep.py의

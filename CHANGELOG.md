@@ -2,6 +2,58 @@
 
 All notable public-release changes are documented here.
 
+## [0.1.4] - 2026-11-16
+
+### Changed
+
+- Transcript (video) notes now receive the video description and metadata (title,
+  channel, publish date) in their synthesis source. The transcript writer prompt
+  forbids claims, applications, or dates that are not in the source, and asks the
+  writer to keep qualifiers, required thresholds, speaker attribution, and the unit
+  of each statement.
+- Transcripts longer than 12,000 characters are split into chunks of about 10,000
+  characters (a transcript without line breaks is split at sentence ends). Each
+  chunk runs through the note harness and is told it is chunk n of N. The chunk
+  notes are then regrouped into one note by topic: a model call, asked three times,
+  proposes topic groups, an opening summary, and which sections belong to the
+  operations/announcements section (only sections all three answers agree on move
+  there). Code copies the chunk body sentences verbatim and orders groups by the
+  earliest source timestamp. If regrouping fails, the chunk notes are merged in
+  source order.
+- On the transcript path the same-model repair pass is off: critic findings and a
+  number-qualifier check are kept as run diagnostics and do not rewrite the note.
+  `text_post` still uses up to two repair passes.
+- Transcript-only timestamp and structure checks read the original transcript
+  instead of the combined source.
+- The shared timestamp gate pads one-digit minutes (`[t=1:6:07]` becomes
+  `[t=01:06:07]`), keeps the time part of comma-joined values, and drops truncated
+  values.
+- Chunked notes: the header `passes_run` lists each chunk's passes plus `regroup`
+  when regrouping succeeds, token totals include regroup calls (also calls made
+  before a regroup failure), and `model_reported` is a single value or a readable
+  `mixed(...)` label.
+- After merging, cleanup removes only sentences that literally contain the chunk
+  notice NoteFactory inserted (`[구간 안내]` or its fixed sentence) and link lines
+  whose only URL is an ellipsis placeholder such as `watch?v=...`. Timestamps in
+  section titles and repeated link lines are tidied, and a link line whose only
+  description says none was given keeps just the URL.
+
+### Known limitations
+
+These apply to transcript notes on the default free writer route and were accepted
+for this release:
+
+- Qualifiers can still be dropped (one or two in a long lecture note); the
+  diagnostic check catches only some of them.
+- Timestamps point to the vicinity of a statement; several statements can share one.
+- In step-by-step lectures, the chunk plan can merge several steps into one topic,
+  which shortens per-step detail. Results vary between runs.
+- Content on a chunk boundary can appear twice.
+- Repetitive "the speaker says" phrasing and a few operational remarks inside content
+  sections can remain.
+- Sentences that restate the chunk notice without its literal marker, and real-format
+  URLs that are not in the source, are not removed.
+
 ## [0.1.3] - 2026-10-24
 
 ### Added

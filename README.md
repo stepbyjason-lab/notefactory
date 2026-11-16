@@ -2,7 +2,7 @@
 
 # NoteFactory
 
-> **Current public release: v0.1.3**
+> **Current public release: v0.1.4**
 
 Turn Sipher's normalized JSON into a usable Korean knowledge note.
 
@@ -23,6 +23,9 @@ It is designed for public content and free-tier model routes by default.
 - Reads Sipher's normalized 8-key JSON from a file or standard input.
 - Generates a Korean knowledge note through a writer → gate → critic → conditional
   repair pipeline.
+- Writes long video transcripts (over 12,000 characters) chunk by chunk and regroups
+  the result by topic. On the transcript path, critic findings are kept as diagnostics
+  instead of triggering a same-model repair.
 - Preserves source URLs with nearby explanations, numbered source sequences, and
   long prompts/templates/code that should remain copyable.
 - Stores provenance in the note header: source, requested/observed model route,
@@ -117,8 +120,8 @@ to change priority.
 
 All API routes, including the default Gemini route and OpenRouter, use the
 second-opinion dispatcher and require Node.js and the process environment variable
-`SECOND_OPINION_DISPATCH` configured in step 0. Since v0.1.3, NVIDIA NIM calls also
-use this path; provide `NVIDIA_NIM_API_KEY` to use a NIM route.
+`SECOND_OPINION_DISPATCH` configured in step 0. NVIDIA NIM calls also use this
+path; provide `NVIDIA_NIM_API_KEY` to use a NIM route.
 
 ### 3. Collect a source with Sipher
 
@@ -167,7 +170,7 @@ python note_pipe.py source.json --out notes_out --profile light
 
 Run `python note_pipe.py --help` for the complete CLI contract.
 
-`--vault` is an internal development integration in v0.1.3: its destination is
+`--vault` is an internal development integration: its destination is
 currently tied to the maintainer's local Windows layout and is not portable. Public
 users should always choose an explicit `--out` directory.
 
@@ -197,6 +200,11 @@ The current benchmark harness records hard preservation contracts, semantic advi
 signals, execution time, routes, and final artifacts. Its automatic qualification is
 a screening signal for known routes, not a substitute for human review when promoting
 an entirely new model to a production recommendation.
+
+Transcript notes have known limitations: a qualifier can be dropped,
+timestamps point to the vicinity of a statement, step-by-step lectures can lose
+per-step detail, chunk-boundary content can repeat, and restated chunk notices or
+real-format URLs not in the source are not removed. See `CHANGELOG.md`.
 
 ## Privacy and security
 
