@@ -107,6 +107,7 @@ from free_llm import (  # noqa: E402
     NoActiveProviderError,
     RetryPolicy,
     StreamingUnavailableError,
+    find_dispatch,
     parse_env_file,
 )
 from note_harness import (  # noqa: E402
@@ -1699,7 +1700,7 @@ def build_note_source(
 
 #: 원래 전사가 이보다 길면 구간으로 나눠 쓴다. 2시간 강의(42,013자)를 한 번에 넣으면
 #: 같은 모델이 귀속·대상·필수선을 놓쳤고, 약 1만 자 구간으로 나누자 크게 나아졌다
-#: (round-33-H1 실측 `D:/Work/NoteFactory/round-33-H1/chunk-exp`).
+#: (round-33-H1 실측).
 TRANSCRIPT_CHUNK_THRESHOLD_CHARS = 12_000
 TRANSCRIPT_CHUNK_CHARS = 10_000
 _CHUNK_TIME_RE = re.compile(r"^\[(\d{1,2}:\d{2}(?::\d{2})?)\]")
@@ -2598,50 +2599,11 @@ def _parse_arbiter_findings(raw_text: str) -> tuple[list[dict] | None, str | Non
 def resolve_second_opinion_dispatch(*, home: Path | None = None) -> Path | None:
     """second-opinion `dispatch.mjs`를 탐색한다(계약 §3.2.4).
 
-    1) 캐시(`~/.claude/plugins/cache/second-opinion/second-opinion/*/scripts/dispatch.mjs`)
-       중 숫자 semantic version 디렉터리 이름을 정수 튜플로 비교해 최고 버전.
-    2) 캐시 후보가 없으면 marketplace fallback.
-    3) 둘 다 없으면 None(second-opinion 미설치 — 1~3단계 skip, Claude로 직행).
-
-    plugin 파일은 읽기 전용 외부 의존성이다 — 수정·복사·vendoring하지 않는다.
+    찾는 순서는 `free_llm.find_dispatch` 하나가 정한다(환경변수 → CODEX_HOME/`~/.codex`
+    캐시 최고 판 → `~/.claude` 캐시 최고 판 → marketplace). 없으면 None(second-opinion
+    미설치 — 1~3단계 skip, Claude로 직행).
     """
-    home = home or Path.home()
-    cache_root = home / ".claude" / "plugins" / "cache" / "second-opinion" / "second-opinion"
-
-    candidates: list[tuple[tuple[int, ...], Path]] = []
-    if cache_root.is_dir():
-        for child in cache_root.iterdir():
-            if not child.is_dir():
-                continue
-            dispatch_path = child / "scripts" / "dispatch.mjs"
-            if not dispatch_path.is_file():
-                continue
-            version = _parse_semver(child.name)
-            if version is not None:
-                candidates.append((version, dispatch_path))
-
-    if candidates:
-        candidates.sort(key=lambda pair: pair[0])
-        return candidates[-1][1]
-
-    marketplace_dispatch = (
-        home / ".claude" / "plugins" / "marketplaces" / "second-opinion"
-        / "plugins" / "second-opinion" / "scripts" / "dispatch.mjs"
-    )
-    if marketplace_dispatch.is_file():
-        return marketplace_dispatch
-
-    return None
-
-
-_SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
-
-
-def _parse_semver(name: str) -> tuple[int, int, int] | None:
-    match = _SEMVER_RE.match(name)
-    if match is None:
-        return None
-    return (int(match[1]), int(match[2]), int(match[3]))
+    return find_dispatch(home=home)
 
 
 def read_agy_model_labels(

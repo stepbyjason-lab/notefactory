@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field, replace
@@ -153,10 +154,6 @@ FAILURE_CLASSES_098 = frozenset({
 })
 FAILURE_ACTORS_098 = frozenset({"vendor", "user", "caller", "dispatcher"})
 _FALLBACK_ACTORS = frozenset({"vendor", "user"})
-
-_DISPATCH_CACHE_ROOT = Path(
-    r"D:\AppData\.codex\plugins\cache\second-opinion\second-opinion"
-)
 
 #: second-opinion의 구독형(로그인 CLI) 벤더. 이들은 `--request-json` 경로가
 #: effort를 codex에만 실어 보내므로, NoteFactory는 벤더 구분 없이 CLI 경로로
@@ -307,19 +304,63 @@ def build_provider_configs(env: dict[str, str]) -> list[ProviderConfig]:
     ]
 
 
-def _resolve_dispatch_path() -> str:
+_SO_CACHE_PARTS = ("plugins", "cache", "second-opinion", "second-opinion")
+_SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+
+def _dispatch_cache_root(home: Path | None = None) -> Path:
+    """Codex 플러그인 캐시 아래 second-opinion 설치 루트. CODEX_HOME이 없으면 홈의 `.codex`."""
+    codex_home = os.environ.get("CODEX_HOME", "").strip()
+    base = Path(codex_home) if codex_home else (home or Path.home()) / ".codex"
+    return base.joinpath(*_SO_CACHE_PARTS)
+
+
+def _highest_cached_dispatch(root: Path) -> Path | None:
+    """`<root>/<X.Y.Z>/scripts/dispatch.mjs` 중 숫자 판이 가장 높은 것. 숫자 판이 아닌 폴더는 건너뛴다."""
+    candidates: list[tuple[tuple[int, int, int], Path]] = []
+    try:
+        children = list(root.iterdir()) if root.is_dir() else []
+    except OSError:
+        return None
+    for child in children:
+        match = _SEMVER_RE.match(child.name)
+        dispatch = child / "scripts" / "dispatch.mjs"
+        if match and dispatch.is_file():
+            candidates.append(((int(match[1]), int(match[2]), int(match[3])), dispatch))
+    return max(candidates, key=lambda pair: pair[0])[1] if candidates else None
+
+
+def find_dispatch(*, home: Path | None = None) -> Path | None:
+    """second-opinion `dispatch.mjs`를 찾는 유일한 함수(free_llm·note_pipe·model_health 공용).
+
+    1) 환경변수 `SECOND_OPINION_DISPATCH` — 있으면 존재 여부와 무관하게 그대로(틀린 지정은 호출부가 크게 실패).
+       상대 경로는 지금 프로세스 cwd 기준 절대경로로 고정한다 — 디스패처를 띄우는 자식은 cwd가 다르다.
+    2) `CODEX_HOME`(없으면 `~/.codex`)의 플러그인 캐시 중 최고 판.
+    3) `~/.claude`의 플러그인 캐시 중 최고 판, 4) `~/.claude` marketplace 사본.
+    5) 없으면 None. plugin 파일은 읽기 전용 외부 의존성이다 — 수정·복사하지 않는다.
+    """
     explicit = os.environ.get("SECOND_OPINION_DISPATCH", "").strip()
     if explicit:
-        return explicit
-    try:
-        found = list(_DISPATCH_CACHE_ROOT.glob("*/scripts/dispatch.mjs"))
-        if found:
-            def version(path: Path) -> tuple[int, ...]:
-                return tuple(int(part) if part.isdigit() else -1 for part in path.parent.parent.name.split("."))
-            return str(max(found, key=version))
-    except OSError:
-        pass
-    return str(_DISPATCH_CACHE_ROOT / "0.9.7" / "scripts" / "dispatch.mjs")
+        return Path(explicit).expanduser().absolute()
+    home = home or Path.home()
+    for root in (_dispatch_cache_root(home), (home / ".claude").joinpath(*_SO_CACHE_PARTS)):
+        found = _highest_cached_dispatch(root)
+        if found is not None:
+            return found
+    marketplace = (
+        home / ".claude" / "plugins" / "marketplaces" / "second-opinion"
+        / "plugins" / "second-opinion" / "scripts" / "dispatch.mjs"
+    )
+    return marketplace if marketplace.is_file() else None
+
+
+def _resolve_dispatch_path() -> str:
+    found = find_dispatch()
+    if found is not None:
+        return str(found)
+    # 설치가 없으면 찾아본 자리를 그대로 돌려준다. 파일이 아니므로 호출부가
+    # 「디스패처를 찾을 수 없다」로 멈추고, 메시지에 어디를 봤는지 남는다.
+    return str(_dispatch_cache_root() / "*" / "scripts" / "dispatch.mjs")
 
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:

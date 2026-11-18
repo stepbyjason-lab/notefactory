@@ -2,6 +2,21 @@
 
 All notable public-release changes are documented here.
 
+## [0.1.5] - 2026-11-18
+
+Fix-only release: the dispatcher path fix below. Without `SECOND_OPINION_DISPATCH`,
+0.1.4 produced no notes. Note generation is unchanged, so note quality is the same
+as in 0.1.4.
+
+### Fixed
+
+- The second-opinion dispatcher no longer needs `SECOND_OPINION_DISPATCH`. NoteFactory
+  looks for it in this order: that variable, the highest installed version under
+  `$CODEX_HOME` (or `~/.codex`), the highest under `~/.claude`, then the Claude Code
+  marketplace copy. A machine-specific default path that no longer existed made every
+  API call fail without the variable. The writer route and the premium arbiter now use
+  the same lookup.
+
 ## [0.1.4] - 2026-11-16
 
 ### Changed

@@ -2,7 +2,7 @@
 
 # NoteFactory
 
-> **Current public release: v0.1.4**
+> **Current public release: v0.1.5**
 
 Turn Sipher's normalized JSON into a usable Korean knowledge note.
 
@@ -59,9 +59,17 @@ and `/plugin install second-opinion@second-opinion`, or clone it with
 In the repository, the dispatcher is `plugins/second-opinion/scripts/dispatch.mjs`;
 after a plugin install, it is `~/.claude/plugins/cache/second-opinion/second-opinion/<version>/scripts/dispatch.mjs`.
 
-Install Node.js and have the path to the second-opinion dispatcher's `dispatch.mjs`
-ready. In the shell used to run NoteFactory, set the process environment variable
-`SECOND_OPINION_DISPATCH` to that path (not in `.env.local`):
+Install Node.js. NoteFactory finds the dispatcher on its own, in this order:
+
+1. the process environment variable `SECOND_OPINION_DISPATCH`, if set;
+2. the highest installed version under `$CODEX_HOME/plugins/cache/second-opinion/second-opinion/`
+   (`~/.codex/...` when `CODEX_HOME` is unset);
+3. the highest installed version under `~/.claude/plugins/cache/second-opinion/second-opinion/`;
+4. the Claude Code marketplace copy of the plugin.
+
+With a plugin install you need nothing else. If you use a cloned repository instead,
+point `SECOND_OPINION_DISPATCH` at it in the shell used to run NoteFactory
+(a process environment variable, not a `.env.local` value):
 
 ```powershell
 # Windows PowerShell
@@ -73,8 +81,8 @@ $env:SECOND_OPINION_DISPATCH = "/path/to/second-opinion/scripts/dispatch.mjs"
 export SECOND_OPINION_DISPATCH="/path/to/second-opinion/scripts/dispatch.mjs"
 ```
 
-Replace the placeholder with your actual dispatcher path and keep the variable set
-in the shell used for the steps below.
+If none of these exist, every API call stops with "second-opinion 디스패처를 찾을 수 없다"
+and the location it searched.
 
 ### 1. Clone and install
 
@@ -119,8 +127,8 @@ They are comma-separated `provider:model` lists, so no source-code edit is neede
 to change priority.
 
 All API routes, including the default Gemini route and OpenRouter, use the
-second-opinion dispatcher and require Node.js and the process environment variable
-`SECOND_OPINION_DISPATCH` configured in step 0. NVIDIA NIM calls also use this
+second-opinion dispatcher and require Node.js and a dispatcher that step 0 can
+find. NVIDIA NIM calls also use this
 path; provide `NVIDIA_NIM_API_KEY` to use a NIM route.
 
 ### 3. Collect a source with Sipher

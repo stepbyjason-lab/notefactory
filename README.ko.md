@@ -2,7 +2,7 @@
 
 # NoteFactory
 
-> **현재 공개 버전: v0.1.4**
+> **현재 공개 버전: v0.1.5**
 
 Sipher가 정규화한 JSON을 한국어 지식노트 Markdown으로 바꾸는 로컬 파이프라인입니다.
 
@@ -51,9 +51,17 @@ Claude Code에서 `/plugin marketplace add stepbyjason-lab/second-opinion` 다�
 저장소에서는 `plugins/second-opinion/scripts/dispatch.mjs`, 플러그인 설치 후에는
 `~/.claude/plugins/cache/second-opinion/second-opinion/<버전>/scripts/dispatch.mjs`에 있습니다.
 
-Node.js를 설치하고 second-opinion 디스패처의 `dispatch.mjs` 경로를 준비합니다.
-NoteFactory를 실행할 셸에서 프로세스 환경변수 `SECOND_OPINION_DISPATCH`에 그 경로를
-지정합니다(`.env.local`에 넣는 값이 아닙니다).
+Node.js를 설치합니다. NoteFactory는 디스패처를 다음 순서로 스스로 찾습니다.
+
+1. 프로세스 환경변수 `SECOND_OPINION_DISPATCH`가 있으면 그 경로
+2. `$CODEX_HOME/plugins/cache/second-opinion/second-opinion/` 아래 가장 높은 판
+   (`CODEX_HOME`이 없으면 `~/.codex/...`)
+3. `~/.claude/plugins/cache/second-opinion/second-opinion/` 아래 가장 높은 판
+4. Claude Code marketplace에 받아 둔 플러그인 사본
+
+플러그인으로 설치했다면 따로 할 일이 없습니다. 저장소를 clone해 쓴다면 NoteFactory를
+실행할 셸에서 `SECOND_OPINION_DISPATCH`에 그 경로를 지정합니다(`.env.local`에 넣는 값이
+아니라 프로세스 환경변수입니다).
 
 ```powershell
 # Windows PowerShell
@@ -65,7 +73,8 @@ $env:SECOND_OPINION_DISPATCH = "/path/to/second-opinion/scripts/dispatch.mjs"
 export SECOND_OPINION_DISPATCH="/path/to/second-opinion/scripts/dispatch.mjs"
 ```
 
-자리표시자를 실제 디스패처 경로로 바꾸고 아래 단계를 진행하는 셸에 환경변수를 유지합니다.
+어디에도 없으면 모든 API 호출이 「second-opinion 디스패처를 찾을 수 없다」와 찾아본 자리를
+남기고 멈춥니다.
 
 ### 1. 설치
 
@@ -109,7 +118,7 @@ Critic
 `.env.local`의 순서만 바꾸면 코드 수정 없이 우선순위를 바꿀 수 있습니다.
 
 기본 Gemini와 OpenRouter를 포함한 모든 API 경로는 second-opinion 디스패처를 거치며,
-Node.js와 0단계에서 설정한 프로세스 환경변수 `SECOND_OPINION_DISPATCH`가 필요합니다.
+Node.js와 0단계의 순서로 찾을 수 있는 디스패처가 필요합니다.
 NVIDIA NIM 호출도 같은 경로를 사용합니다. NIM 경로를 쓰려면
 `NVIDIA_NIM_API_KEY`를 입력합니다.
 
